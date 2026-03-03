@@ -71,10 +71,39 @@ export default function ExpenseTracker() {
   // Insights period
   const [insAllTime,  setInsAllTime]  = useState(false);
   const [insMonth,    setInsMonth]    = useState(() => { const n = new Date(); return { year: n.getFullYear(), month: n.getMonth() }; });
+  const [keyMod,     setKeyMod]     = useState(false);
+  const [userKey,    setUserKey]    = useState(null);
+  const [keyLoading, setKeyLoading] = useState(false);
   const aRef = useRef(null);
   const tRef = useRef({});
   const mRef = useRef({}); // modal swipe-down tracking
   const lastTouchTime = useRef(0); // desktop click detection
+
+  // ── Load user's shortcut key ─────────────────────────────────────────────
+  useEffect(() => {
+    if (!userId) return;
+    supabase.from("user_keys").select("key_value").eq("user_id", userId).maybeSingle()
+      .then(({ data }) => setUserKey(data?.key_value || null));
+  }, [userId]);
+
+  const handleGenerateKey = useCallback(async () => {
+    setKeyLoading(true);
+    const chars = "abcdefghjkmnpqrstuvwxyz";
+    const digits = "0123456789";
+    let k = "";
+    for (let i = 0; i < 3; i++) k += chars[Math.floor(Math.random() * chars.length)];
+    for (let i = 0; i < 4; i++) k += digits[Math.floor(Math.random() * digits.length)];
+    await supabase.from("user_keys").delete().eq("user_id", userId);
+    const { error } = await supabase.from("user_keys").insert({ user_id: userId, key_value: k });
+    if (error) sToast("Error generating key", "err");
+    else { setUserKey(k); sToast("Key generated"); }
+    setKeyLoading(false);
+  }, [userId, sToast]);
+
+  const copyKey = useCallback(() => {
+    if (!userKey) return;
+    navigator.clipboard?.writeText(userKey).then(() => sToast("Copied!")).catch(() => sToast("Copy failed", "err"));
+  }, [userKey, sToast]);
 
   // ── Load data + realtime ──────────────────────────────────────────────────
   useEffect(() => {
@@ -349,7 +378,10 @@ export default function ExpenseTracker() {
             {view === "add" ? "Add Expense" : view === "list" ? (selTrip ? (trips.find(t => t.id === selTrip)?.name || "History") : "History") : view === "insights" ? "Insights" : "Trips"}
           </span>
         </div>
-        <button onClick={signOut} style={{ background: "none", border: `1.5px solid ${G.bdr}`, borderRadius: 8, padding: "5px 11px", fontSize: 13, fontWeight: 600, color: G.t3, cursor: "pointer" }}>Out</button>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => setKeyMod(true)} title="API Key" style={{ background: "none", border: `1.5px solid ${G.bdr}`, borderRadius: 8, padding: "5px 10px", fontSize: 15, color: G.t3, cursor: "pointer", lineHeight: 1 }}>🔑</button>
+          <button onClick={signOut} style={{ background: "none", border: `1.5px solid ${G.bdr}`, borderRadius: 8, padding: "5px 11px", fontSize: 13, fontWeight: 600, color: G.t3, cursor: "pointer" }}>Out</button>
+        </div>
       </header>
 
       <main style={{ flex: 1, overflowY: view === "add" ? "hidden" : "auto", paddingBottom: 72 }}>
@@ -706,6 +738,47 @@ export default function ExpenseTracker() {
             <input type="text" placeholder="Trip name" value={tName} onChange={e => setTName(e.target.value)} style={{ width: "100%", padding: 14, borderRadius: 12, border: `2px solid ${G.bdr}`, fontSize: 17, outline: "none", boxSizing: "border-box", color: G.t1, background: G.bg2, marginBottom: 10 }} autoFocus />
             <input type="tel" inputMode="numeric" placeholder="Budget (optional)" value={tBudg} onChange={e => setTBudg(e.target.value.replace(/[^0-9]/g, ""))} style={{ width: "100%", padding: 14, borderRadius: 12, border: `2px solid ${G.bdr}`, fontSize: 17, outline: "none", boxSizing: "border-box", color: G.t1, background: G.bg2, marginBottom: 16 }} />
             <button onClick={doSaveTrip} style={{ width: "100%", padding: 16, borderRadius: 14, border: "none", background: G.bk, color: G.wh, fontSize: 18, fontWeight: 700, cursor: "pointer" }}>{editTripId ? "Update Trip" : "Create Trip"}</button>
+          </div>
+        </div>
+      )}
+
+      {/* ══════ KEY MODAL ══════ */}
+      {keyMod && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 999 }} onClick={() => setKeyMod(false)}>
+          <div style={{ width: "100%", maxWidth: 390, background: G.bg, borderRadius: "20px 20px 0 0", padding: "24px 20px 40px" }} onClick={e => e.stopPropagation()}>
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: G.lt, margin: "0 auto 18px" }} />
+            <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 6 }}>Shortcut API Key</div>
+            <div style={{ fontSize: 14, color: G.t3, marginBottom: 20, lineHeight: 1.5 }}>
+              Generate a key and enter it once in the iPhone Shortcut. Anyone with this key can log expenses to your account — keep it private.
+            </div>
+
+            {userKey ? (
+              <>
+                <div style={{ display: "flex", alignItems: "center", background: G.bg2, borderRadius: 12, padding: "14px 16px", marginBottom: 12, gap: 12 }}>
+                  <span style={{ fontFamily: "monospace", fontSize: 24, fontWeight: 800, letterSpacing: 4, flex: 1, color: G.t1 }}>{userKey}</span>
+                  <button onClick={copyKey} style={{ background: G.bk, color: G.wh, border: "none", borderRadius: 8, padding: "8px 16px", fontSize: 14, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>Copy</button>
+                </div>
+                <button onClick={handleGenerateKey} disabled={keyLoading}
+                  style={{ width: "100%", padding: "13px", borderRadius: 12, border: `2px solid ${G.bdr}`, background: G.bg, color: G.t2, fontSize: 14, fontWeight: 600, cursor: "pointer", marginBottom: 16 }}>
+                  {keyLoading ? "Generating…" : "Regenerate Key"}
+                </button>
+                <div style={{ fontSize: 12, color: G.tm, textAlign: "center", marginBottom: 16 }}>Regenerating will break the old Shortcut — update the key value in Shortcuts too.</div>
+              </>
+            ) : (
+              <button onClick={handleGenerateKey} disabled={keyLoading}
+                style={{ width: "100%", padding: "16px", borderRadius: 14, border: "none", background: G.bk, color: G.wh, fontSize: 17, fontWeight: 700, cursor: "pointer", marginBottom: 16 }}>
+                {keyLoading ? "Generating…" : "Generate Key"}
+              </button>
+            )}
+
+            <div style={{ background: G.bg2, borderRadius: 12, padding: "14px 16px", fontSize: 13, color: G.t2, lineHeight: 1.7 }}>
+              <div style={{ fontWeight: 700, marginBottom: 4, fontSize: 13 }}>Setup steps</div>
+              <div>1. Tap <b>Generate Key</b> and copy the key</div>
+              <div>2. Open <b>Shortcuts → My Shortcuts</b></div>
+              <div>3. Edit your bank SMS shortcut</div>
+              <div>4. Set the <b>key</b> field to your copied key</div>
+              <div>5. Done — bank SMS will auto-log expenses</div>
+            </div>
           </div>
         </div>
       )}
