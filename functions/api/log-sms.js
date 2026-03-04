@@ -79,7 +79,7 @@ export async function onRequestPost(context) {
     return new Response(JSON.stringify({ ok: false, error: error.message }), { status: 500, headers: cors });
   }
 
-  return new Response(JSON.stringify({ ok: true, amount, note, category: catId }), { headers: cors });
+  return new Response(JSON.stringify({ ok: true, amount, note, category: catId, logged_for: userId }), { headers: cors });
 }
 
 export async function onRequestOptions() {
@@ -116,7 +116,8 @@ function isDebitSms(sms) {
   if (/money\s+received/i.test(s)) return false;
 
   // Must contain at least one debit-type keyword
-  return /debit(?:ed)?|withdrawn|withdrawal|spent|paid|purchase[d]?|transfer(?:red)?\s+from|payment\s+of|\bemi\b/i.test(sms);
+  // "Sent Rs.X" is the HDFC UPI push notification format
+  return /debit(?:ed)?|withdrawn|withdrawal|\bsent\b|spent|paid|purchase[d]?|transfer(?:red)?\s+from|payment\s+of|\bemi\b/i.test(sms);
 }
 
 /**

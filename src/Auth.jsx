@@ -117,8 +117,10 @@ function AuthInner() {
         if (error) setErr(error.message);
       } else {
         const { error } = await supabase.auth.signUp({ email: email.trim(), password });
-        if (error) setErr(error.message);
-        else setInfo("Check your email to confirm your account, then sign in.");
+        if (error) {
+          if (/already registered|already exists|already.*sign/i.test(error.message)) setErr("__exists__");
+          else setErr(error.message);
+        } else setInfo("Check your email to confirm your account, then sign in.");
       }
     } finally { setBusy(false); }
   };
@@ -142,7 +144,9 @@ function AuthInner() {
       </div>
 
       {err  && <div style={{ background: "#FFF0F0", border: "1.5px solid #FFCCCC", borderRadius: 10,
-                             padding: "12px 16px", fontSize: 14, color: "#CC0000", marginBottom: 14 }}>{err}</div>}
+                             padding: "12px 16px", fontSize: 14, color: "#CC0000", marginBottom: 14 }}>
+        {err === "__exists__" ? (<>Account already exists — <button onClick={() => reset("login")} style={{ background: "none", border: "none", padding: 0, fontSize: 14, fontWeight: 700, color: "#CC0000", cursor: "pointer", textDecoration: "underline" }}>try signing in</button></>) : err}
+      </div>}
       {info && <div style={{ background: "#F0F7FF", border: "1.5px solid #CCE0FF", borderRadius: 10,
                              padding: "12px 16px", fontSize: 14, color: "#0055CC", marginBottom: 14 }}>{info}</div>}
 

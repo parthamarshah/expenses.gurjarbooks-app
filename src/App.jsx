@@ -7,7 +7,7 @@ const CATEGORIES = [
   { id: "personal",   label: "Personal", icon: "👤" },
   { id: "work",       label: "Work",     icon: "💼" },
   { id: "home",       label: "Home",     icon: "🏠" },
-  { id: "investment", label: "Savings",  icon: "💰" },
+  { id: "investment", label: "Savings",  icon: "₹" },
 ];
 const PAY = [{ id: "cash", label: "Cash" }, { id: "bank", label: "Bank" }];
 
@@ -38,6 +38,12 @@ const G = {
   bg: "#FFF", bg2: "#F5F5F5", bg3: "#EBEBEB", bdr: "#D4D4D4",
   t1: "#111", t2: "#555", t3: "#888", tm: "#AAA",
   bk: "#000", wh: "#FFF", dk: "#1A1A1A", md: "#333", lt: "#E0E0E0", ac: "#444",
+};
+
+// Static styles hoisted to avoid re-allocation on every render
+const S = {
+  expCard: { display: "flex", alignItems: "center", gap: 12, padding: "13px 14px", background: "#F5F5F5", borderRadius: 12, position: "relative", zIndex: 2, transition: "transform .2s ease", willChange: "transform" },
+  expIcon: { width: 38, height: 38, borderRadius: 10, background: "#1A1A1A", color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 },
 };
 
 export default function ExpenseTracker() {
@@ -71,6 +77,7 @@ export default function ExpenseTracker() {
   // Insights period
   const [insAllTime,  setInsAllTime]  = useState(false);
   const [insMonth,    setInsMonth]    = useState(() => { const n = new Date(); return { year: n.getFullYear(), month: n.getMonth() }; });
+  const [editDate,  setEditDate]  = useState("");
   const [keyMod,     setKeyMod]     = useState(false);
   const [userKey,    setUserKey]    = useState(null);
   const [keyLoading, setKeyLoading] = useState(false);
@@ -152,6 +159,21 @@ export default function ExpenseTracker() {
     return s.length >= 3 ? s : [100, 200, 500, 1000, 2000];
   }, [exps]);
 
+  const noteSuggestions = useMemo(() => {
+    const amtNum = Number(amt);
+    const cutoff = Date.now() - 90 * 864e5;
+    const recent = exps.filter(e => new Date(e.date).getTime() > cutoff && e.note && e.note.trim());
+    const matched = recent.filter(e => {
+      const sameCat = e.category === cat || (cat.startsWith("trip_") && e.tripId === cat.replace("trip_", ""));
+      const simAmt = amtNum > 0 && e.amount > 0 && Math.abs(e.amount - amtNum) / Math.max(amtNum, 1) <= 0.3;
+      const samePay = e.payMode === pay;
+      return sameCat || simAmt || samePay;
+    });
+    const freq = {};
+    matched.forEach(e => { const n = e.note.trim(); freq[n] = (freq[n] || 0) + 1; });
+    return Object.entries(freq).filter(([, c]) => c >= 2).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n]) => n);
+  }, [exps, amt, cat, pay]);
+
   const sToast = useCallback((m, t = "ok") => { setToast({ m, t }); setTimeout(() => setToast(null), 1500); }, []);
 
   useEffect(() => { if (view === "add" && aRef.current) setTimeout(() => aRef.current?.focus(), 80); }, [view]);
@@ -189,9 +211,10 @@ export default function ExpenseTracker() {
     hap();
     const tid = cat.startsWith("trip_") ? cat.replace("trip_", "") : null;
     if (editId) {
-      const updated = { ...exps.find(e => e.id === editId), amount: v, note: note.trim(), category: tid ? "trip" : cat, payMode: pay, tripId: tid };
+      const orig = exps.find(e => e.id === editId);
+      const updated = { ...orig, amount: v, note: note.trim(), category: tid ? "trip" : cat, payMode: pay, tripId: tid, date: editDate ? new Date(editDate + "T12:00:00").toISOString() : orig?.date };
       setExps(p => p.map(e => e.id === editId ? updated : e));
-      setEditId(null); sToast("Updated");
+      setEditId(null); setEditDate(""); sToast("Updated");
       supabase.from("expenses").update(expToDb(updated, userId)).eq("id", editId)
         .then(({ error }) => { if (error) sToast("Sync error", "err"); });
     } else {
@@ -207,7 +230,7 @@ export default function ExpenseTracker() {
     }
     setAmt(""); setNote("");
     setTimeout(() => aRef.current?.focus(), 50);
-  }, [amt, cat, note, pay, editId, exps, userId, sToast]);
+  }, [amt, cat, note, pay, editId, editDate, exps, userId, sToast]);
 
   const doDel = useCallback((id) => {
     hap();
@@ -218,12 +241,14 @@ export default function ExpenseTracker() {
       .then(({ error }) => { if (error) sToast("Sync error", "err"); });
   }, [sToast]);
 
-  const doEdit = (exp) => {
+  const doEdit = useCallback((exp) => {
     setAmt(exp.amount.toString()); setNote(exp.note || "");
     setCat(exp.tripId ? `trip_${exp.tripId}` : exp.category);
-    setPay(exp.payMode); setEditId(exp.id); setView("add");
+    setPay(exp.payMode); setEditId(exp.id);
+    setEditDate(new Date(exp.date).toISOString().slice(0, 10));
+    setView("add");
     setSw({ id: null, dir: null }); setDetMod(null);
-  };
+  }, []);
 
   const doSaveTrip = useCallback(async () => {
     if (!tName.trim()) return; hap();
@@ -331,18 +356,18 @@ export default function ExpenseTracker() {
   }, [exps]);
 
   // ── Swipe handlers ────────────────────────────────────────────────────────
-  const onTS = (e, id) => { lastTouchTime.current = Date.now(); tRef.current = { sx: e.touches[0].clientX, sy: e.touches[0].clientY, id, t: Date.now() }; };
-  const onTE = (e) => {
+  const onTS = useCallback((e, id) => { lastTouchTime.current = Date.now(); tRef.current = { sx: e.touches[0].clientX, sy: e.touches[0].clientY, id, t: Date.now() }; }, []);
+  const onTE = useCallback((e) => {
     const dx = e.changedTouches[0].clientX - tRef.current.sx;
     const dy = Math.abs(e.changedTouches[0].clientY - tRef.current.sy);
     const el = Date.now() - tRef.current.t;
     const id = tRef.current.id;
     if (dy > 50) { setSw({ id: null, dir: null }); setSwipeConf(null); return; }
     if (Math.abs(dx) < 15 && el < 300) { const ex = exps.find(x => x.id === id); if (ex) setDetMod(ex); setSw({ id: null, dir: null }); setSwipeConf(null); return; }
-    if (dx < -50) setSw({ id, dir: "left" });
-    else if (dx > 50) setSw({ id, dir: "right" });
+    if (dx < -50) { const ex = exps.find(x => x.id === id); if (ex) doEdit(ex); return; }
+    if (dx > 50) setSw({ id, dir: "right" });
     else { setSw({ id: null, dir: null }); setSwipeConf(null); }
-  };
+  }, [exps, doEdit]);
 
   const getCL = (e) => { if (e.tripId) { const t = trips.find(x => x.id === e.tripId); return t ? t.name : "Trip"; } return CATEGORIES.find(c => c.id === e.category)?.label || e.category; };
   const getCI = (e) => { if (e.tripId) return "\u2708\uFE0F"; return CATEGORIES.find(c => c.id === e.category)?.icon || "?"; };
@@ -351,7 +376,7 @@ export default function ExpenseTracker() {
   const viewTH = (tid) => { setSelTrip(tid); setFCat("all"); setFPay("all"); setSq(""); setView("list"); };
 
   const B = (sel, children, onClick, extra = {}) => (
-    <button onClick={onClick} style={{ padding: "8px 14px", borderRadius: 18, cursor: "pointer", fontSize: 15, fontWeight: sel ? 700 : 500, border: `2px solid ${sel ? G.bk : G.bdr}`, background: sel ? G.bk : G.bg, color: sel ? G.wh : G.t2, ...extra }}>{children}</button>
+    <button onClick={onClick} style={{ padding: "7px 10px", borderRadius: 18, cursor: "pointer", fontSize: 13, fontWeight: sel ? 700 : 500, border: `2px solid ${sel ? G.bk : G.bdr}`, background: sel ? G.bk : G.bg, color: sel ? G.wh : G.t2, ...extra }}>{children}</button>
   );
 
   // ── Auth guards (must be after all hooks) ─────────────────────────────────
@@ -373,7 +398,7 @@ export default function ExpenseTracker() {
 
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 18px", background: G.bg, borderBottom: `1px solid ${G.bdr}`, position: "sticky", top: 0, zIndex: 100 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 34, height: 34, borderRadius: 8, background: G.bk, color: G.wh, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 17 }}>{"\u20B9"}</div>
+          <div onClick={() => navTo("add")} style={{ width: 34, height: 34, borderRadius: 8, background: G.bk, color: G.wh, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 17, cursor: "pointer" }}>{"\u20B9"}</div>
           <span style={{ fontWeight: 700, fontSize: 18, letterSpacing: -0.5 }}>
             {view === "add" ? "Add Expense" : view === "list" ? (selTrip ? (trips.find(t => t.id === selTrip)?.name || "History") : "History") : view === "insights" ? "Insights" : "Trips"}
           </span>
@@ -399,7 +424,8 @@ export default function ExpenseTracker() {
           <div style={{ padding: "8px 18px 0", display: "flex", flexDirection: "column", height: "calc(100dvh - 48px - 64px)", overflow: "hidden", justifyContent: "space-between" }}>
             <div style={{ display: "flex", alignItems: "baseline", justifyContent: "center", padding: "10px 0 4px" }}>
               <span style={{ fontSize: 32, fontWeight: 300, color: G.tm, marginRight: 2 }}>{"\u20B9"}</span>
-              <input ref={aRef} type="tel" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={amt} onChange={e => setAmt(e.target.value.replace(/[^0-9]/g, ""))} onKeyDown={e => { if (e.key === "Enter") doSave(); }} style={{ fontSize: 46, fontWeight: 800, border: "none", outline: "none", width: "60%", textAlign: "center", color: G.t1, background: "transparent", letterSpacing: -2, caretColor: G.md }} autoFocus autoComplete="off" />
+              <input ref={aRef} type="tel" inputMode="numeric" pattern="[0-9]*" placeholder="0" value={amt} onChange={e => setAmt(e.target.value.replace(/[^0-9]/g, ""))} onKeyDown={e => { if (e.key === "Enter") doSave(); }} style={{ fontSize: 46, fontWeight: 800, border: "none", outline: "none", width: "55%", textAlign: "center", color: G.t1, background: "transparent", letterSpacing: -2, caretColor: G.md }} autoFocus autoComplete="off" />
+              {amt !== "" && <button onClick={() => { hap(); setAmt(""); aRef.current?.focus(); }} tabIndex={-1} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 22, color: G.tm, padding: "0 4px", lineHeight: 1 }}>{"\u2715"}</button>}
             </div>
 
             <div style={{ display: "flex", gap: 6, justifyContent: "center", flexWrap: "wrap", margin: "0 0 8px" }}>
@@ -412,7 +438,7 @@ export default function ExpenseTracker() {
 
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, color: G.t3, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 6 }}>Category</div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
                 {addCats.map(c => B(cat === c.id, c.label, () => { hap(); setCat(c.id); }))}
               </div>
             </div>
@@ -426,11 +452,21 @@ export default function ExpenseTracker() {
               </div>
             </div>
 
-            <input type="text" placeholder="Note (optional)" value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === "Enter") doSave(); }} style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `2px solid ${G.bdr}`, fontSize: 16, outline: "none", boxSizing: "border-box", color: G.t1, background: G.bg2 }} autoComplete="off" />
+            <div>
+              <input type="text" placeholder="Note (optional)" value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === "Enter") doSave(); }} style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `2px solid ${G.bdr}`, fontSize: 16, outline: "none", boxSizing: "border-box", color: G.t1, background: G.bg2 }} autoComplete="off" />
+              {noteSuggestions.length > 0 && !note && (
+                <div style={{ display: "flex", gap: 6, overflowX: "auto", marginTop: 6, paddingBottom: 2, WebkitOverflowScrolling: "touch" }}>
+                  {noteSuggestions.map(s => (
+                    <button key={s} onClick={() => { hap(); setNote(s); }} style={{ padding: "5px 12px", borderRadius: 16, border: `1.5px solid ${G.bdr}`, background: G.bg2, color: G.t2, fontSize: 12, fontWeight: 500, whiteSpace: "nowrap", cursor: "pointer", flexShrink: 0 }}>{s}</button>
+                  ))}
+                </div>
+              )}
+            </div>
 
             <div>
+              {editId && <input type="date" value={editDate} onChange={e => setEditDate(e.target.value)} style={{ width: "100%", padding: "10px 14px", borderRadius: 12, border: `2px solid ${G.bdr}`, fontSize: 15, outline: "none", boxSizing: "border-box", color: G.t1, background: G.bg2, marginBottom: 6 }} />}
               <button onClick={doSave} style={{ width: "100%", padding: "15px", borderRadius: 14, border: "none", background: G.bk, color: G.wh, fontSize: 18, fontWeight: 700, cursor: "pointer" }}>{editId ? "Update" : "Save"}</button>
-              {editId && <button onClick={() => { setEditId(null); setAmt(""); setNote(""); }} style={{ width: "100%", padding: "11px", borderRadius: 12, marginTop: 5, border: `2px solid ${G.bdr}`, background: "transparent", color: G.t2, fontSize: 15, fontWeight: 600, cursor: "pointer" }}>Cancel</button>}
+              {editId && <button onClick={() => { setEditId(null); setEditDate(""); setAmt(""); setNote(""); }} style={{ width: "100%", padding: "11px", borderRadius: 12, marginTop: 5, border: `2px solid ${G.bdr}`, background: "transparent", color: G.t2, fontSize: 15, fontWeight: 600, cursor: "pointer" }}>Cancel</button>}
             </div>
           </div>
         )}
@@ -502,12 +538,8 @@ export default function ExpenseTracker() {
                               {swipeConf === exp.id ? "Sure?" : "Delete"}
                             </button>
                           </div>
-                          {/* Swipe left → Edit directly */}
-                          <div style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 80, background: G.md, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1, opacity: dir === "left" ? 1 : 0, transition: "opacity .15s", borderRadius: "0 12px 12px 0" }}>
-                            <button onClick={() => doEdit(exp)} style={{ background: "none", border: "none", color: G.wh, fontWeight: 700, fontSize: 13, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}><span style={{ fontSize: 18 }}>{"\u270E"}</span>Edit</button>
-                          </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 14px", background: G.bg2, borderRadius: 12, position: "relative", zIndex: 2, transform: dir === "left" ? "translateX(-80px)" : dir === "right" ? "translateX(80px)" : "translateX(0)", transition: "transform .2s ease" }}>
-                            <div style={{ width: 38, height: 38, borderRadius: 10, background: G.dk, color: G.wh, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>{getCI(exp)}</div>
+                          <div style={{ ...S.expCard, transform: dir === "right" ? "translateX(80px)" : "translateX(0)" }}>
+                            <div style={S.expIcon}>{getCI(exp)}</div>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ fontWeight: 800, fontSize: 17 }}>{formatINR(exp.amount)}</div>
                               <div style={{ fontSize: 14, color: G.t3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -572,10 +604,10 @@ export default function ExpenseTracker() {
             </div>
 
             <div style={{ marginBottom: 20 }}>
-              <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>By Payment Mode</div>
+              <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>By Payment Mode <span style={{ fontSize: 12, color: G.tm, fontWeight: 400 }}>{"\u00B7"} tap to filter history</span></div>
               {Object.entries(ins.bp).sort((a, b) => b[1] - a[1]).map(([pid, a]) => {
                 const p = ins.totM > 0 ? (a / ins.totM * 100) : 0;
-                return (<div key={pid} style={{ marginBottom: 14 }}>
+                return (<div key={pid} onClick={() => { hap(); setSelTrip(null); setFCat("all"); setSq(""); setFPay(pid); setSw({ id: null, dir: null }); setSwipeConf(null); setView("list"); }} style={{ marginBottom: 14, cursor: "pointer" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: G.t2, marginBottom: 5 }}><span>{PAY.find(x => x.id === pid)?.label || pid}</span><span style={{ fontWeight: 700, color: G.t1 }}>{formatINR(a)}</span></div>
                   <div style={{ height: 7, background: G.bg3, borderRadius: 8, overflow: "hidden" }}><div style={{ height: 7, borderRadius: 8, background: G.ac, width: `${p}%`, transition: "width .4s" }} /></div>
                   <div style={{ fontSize: 12, color: G.tm, marginTop: 3, textAlign: "right" }}>{Math.round(p)}%</div>
