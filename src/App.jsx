@@ -74,9 +74,10 @@ export default function ExpenseTracker() {
   const [detMod,    setDetMod]    = useState(null);
   const [tripDet,   setTripDet]   = useState(null);
   const [confDel,   setConfDel]   = useState(null); // trip deletion confirm
-  // Insights period
-  const [insAllTime,  setInsAllTime]  = useState(false);
+  // Insights period: "month" | "year" | "all"
+  const [insPeriod,   setInsPeriod]   = useState("month");
   const [insMonth,    setInsMonth]    = useState(() => { const n = new Date(); return { year: n.getFullYear(), month: n.getMonth() }; });
+  const [insYear,     setInsYear]     = useState(() => new Date().getFullYear());
   const [editDate,  setEditDate]  = useState("");
   const [keyMod,     setKeyMod]     = useState(false);
   const [userKey,    setUserKey]    = useState(null);
@@ -315,33 +316,59 @@ export default function ExpenseTracker() {
   }, [exps, fCat, fPay, sq, selTrip, allCats]);
 
   // ── Insights ──────────────────────────────────────────────────────────────
-  const insMonthLabel = useMemo(() => {
-    if (insAllTime) return "All Time";
+  const insPeriodLabel = useMemo(() => {
+    if (insPeriod === "all") return "All Time";
+    if (insPeriod === "year") return insYear.toString();
     return new Date(insMonth.year, insMonth.month, 1).toLocaleDateString("en-IN", { month: "long", year: "numeric" });
-  }, [insMonth, insAllTime]);
+  }, [insMonth, insYear, insPeriod]);
 
   const ins = useMemo(() => {
     const tm = exps.filter(e => {
       if (e.category === "investment") return false;
-      if (insAllTime) return true;
+      if (insPeriod === "all") return true;
       const d = new Date(e.date);
+      if (insPeriod === "year") return d.getFullYear() === insYear;
       return d.getMonth() === insMonth.month && d.getFullYear() === insMonth.year;
     });
     const bc = {}, bp = {};
     tm.forEach(e => { const k = e.tripId ? `trip_${e.tripId}` : e.category; bc[k] = (bc[k] || 0) + e.amount; bp[e.payMode] = (bp[e.payMode] || 0) + e.amount; });
     const totM = tm.reduce((s, e) => s + e.amount, 0);
-    const totI = exps.filter(e => e.category === "investment" && !e.tripId).reduce((s, e) => s + e.amount, 0);
+    const savFilter = insPeriod === "year"
+      ? e => e.category === "investment" && !e.tripId && new Date(e.date).getFullYear() === insYear
+      : insPeriod === "month"
+        ? e => e.category === "investment" && !e.tripId && new Date(e.date).getMonth() === insMonth.month && new Date(e.date).getFullYear() === insMonth.year
+        : e => e.category === "investment" && !e.tripId;
+    const totI = exps.filter(savFilter).reduce((s, e) => s + e.amount, 0);
     return { bc, bp, totM, totI, mc: tm.length };
-  }, [exps, insMonth, insAllTime]);
+  }, [exps, insMonth, insYear, insPeriod]);
 
-  const shiftMonth = useCallback((dir) => {
-    setInsAllTime(false);
-    setInsMonth(prev => {
-      let m = prev.month + dir, y = prev.year;
-      if (m < 0)  { m = 11; y--; }
-      if (m > 11) { m = 0;  y++; }
-      return { year: y, month: m };
+  // Yearly bar chart data: monthly breakdown for the selected year
+  const yearlyBars = useMemo(() => {
+    if (insPeriod !== "year") return [];
+    const months = Array.from({ length: 12 }, (_, i) => ({ month: i, total: 0 }));
+    exps.forEach(e => {
+      if (e.category === "investment") return;
+      const d = new Date(e.date);
+      if (d.getFullYear() === insYear) months[d.getMonth()].total += e.amount;
     });
+    return months;
+  }, [exps, insYear, insPeriod]);
+
+  const shiftPeriod = useCallback((dir) => {
+    if (insPeriod === "month") {
+      setInsMonth(prev => {
+        let m = prev.month + dir, y = prev.year;
+        if (m < 0)  { m = 11; y--; }
+        if (m > 11) { m = 0;  y++; }
+        return { year: y, month: m };
+      });
+    } else if (insPeriod === "year") {
+      setInsYear(prev => prev + dir);
+    }
+  }, [insPeriod]);
+
+  const cyclePeriod = useCallback(() => {
+    setInsPeriod(p => p === "month" ? "year" : p === "year" ? "all" : "month");
   }, []);
 
   // ── Trip insights ─────────────────────────────────────────────────────────
@@ -476,7 +503,10 @@ export default function ExpenseTracker() {
                 return (
                   <div style={{ display: "flex", alignItems: "center", background: G.bg2, borderRadius: 12, padding: "4px 4px", marginBottom: 6 }}>
                     <button onClick={() => shiftDay(-1)} style={{ width: 36, height: 36, borderRadius: 9, border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: G.t1, fontWeight: 600 }}>‹</button>
-                    <div style={{ flex: 1, textAlign: "center", fontSize: 14, fontWeight: 600, color: G.t1 }}>{lbl}</div>
+                    <div style={{ flex: 1, textAlign: "center", fontSize: 14, fontWeight: 600, color: G.t1, position: "relative", cursor: "pointer" }}>
+                      {lbl}
+                      <input type="date" value={editDate} max={today} onChange={e => { if (e.target.value && e.target.value <= today) setEditDate(e.target.value); }} style={{ position: "absolute", inset: 0, opacity: 0, cursor: "pointer", width: "100%", fontSize: 16 }} />
+                    </div>
                     <button onClick={() => shiftDay(1)} disabled={editDate >= today} style={{ width: 36, height: 36, borderRadius: 9, border: "none", background: "transparent", fontSize: 18, cursor: editDate >= today ? "default" : "pointer", color: editDate >= today ? G.tm : G.t1, fontWeight: 600 }}>›</button>
                   </div>
                 );
@@ -517,7 +547,13 @@ export default function ExpenseTracker() {
             )}
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 2px", fontSize: 14, color: G.t3, borderBottom: `1px solid ${G.lt}`, marginBottom: 6 }}>
-              <span>{filtered.length} entries</span>
+              <span>{filtered.length} entries{filtered.length > 0 && (() => {
+                const dates = filtered.map(e => new Date(e.date));
+                const oldest = new Date(Math.min(...dates));
+                const newest = new Date(Math.max(...dates));
+                if (sameDay(oldest, newest)) return ` · ${dayLbl(oldest)}`;
+                return ` · ${oldest.toLocaleDateString("en-IN", { day: "numeric", month: "short" })} – ${newest.toLocaleDateString("en-IN", { day: "numeric", month: "short" })}`;
+              })()}</span>
               <span style={{ fontWeight: 800, fontSize: 16, color: G.t1 }}>{formatINR(filtered.reduce((s, e) => s + e.amount, 0))}</span>
             </div>
 
@@ -584,28 +620,56 @@ export default function ExpenseTracker() {
 
             {/* Period navigator */}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, background: G.bg2, borderRadius: 12, padding: "4px 4px" }}>
-              <button onClick={() => shiftMonth(-1)} disabled={insAllTime}
-                style={{ width: 36, height: 36, borderRadius: 9, border: "none", background: "transparent", fontSize: 18, cursor: insAllTime ? "default" : "pointer", color: insAllTime ? G.tm : G.t1, fontWeight: 600 }}>‹</button>
-              <button onClick={() => setInsAllTime(a => !a)}
+              {insPeriod !== "all" ? (
+                <button onClick={() => shiftPeriod(-1)}
+                  style={{ width: 36, height: 36, borderRadius: 9, border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: G.t1, fontWeight: 600 }}>‹</button>
+              ) : <div style={{ width: 36 }} />}
+              <button onClick={cyclePeriod}
                 style={{ flex: 1, padding: "7px 0", border: "none", background: "transparent", fontSize: 14, fontWeight: 700, cursor: "pointer", color: G.t1, textAlign: "center" }}>
-                {insMonthLabel}
+                {insPeriodLabel}
               </button>
-              <button onClick={() => shiftMonth(1)} disabled={insAllTime}
-                style={{ width: 36, height: 36, borderRadius: 9, border: "none", background: "transparent", fontSize: 18, cursor: insAllTime ? "default" : "pointer", color: insAllTime ? G.tm : G.t1, fontWeight: 600 }}>›</button>
+              {insPeriod !== "all" ? (
+                <button onClick={() => shiftPeriod(1)}
+                  style={{ width: 36, height: 36, borderRadius: 9, border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: G.t1, fontWeight: 600 }}>›</button>
+              ) : <div style={{ width: 36 }} />}
             </div>
 
             <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
               <div style={{ flex: 1, borderRadius: 14, padding: "14px 14px", background: G.bk, color: G.wh }}>
-                <div style={{ fontSize: 10, fontWeight: 700, color: "#888", letterSpacing: 1, textTransform: "uppercase" }}>{insAllTime ? "All Time" : "Expenses"}</div>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "#888", letterSpacing: 1, textTransform: "uppercase" }}>{insPeriod === "all" ? "All Time" : "Expenses"}</div>
                 <div style={{ fontSize: 22, fontWeight: 800, marginTop: 5, letterSpacing: -.5 }}>{formatINR(ins.totM)}</div>
                 <div style={{ fontSize: 12, color: "#666", marginTop: 3 }}>{ins.mc} entries</div>
               </div>
               <div style={{ flex: 1, borderRadius: 14, padding: "14px 14px", background: G.bg2, border: `1.5px solid ${G.bdr}` }}>
                 <div style={{ fontSize: 10, fontWeight: 700, color: G.t3, letterSpacing: 1, textTransform: "uppercase" }}>Savings</div>
                 <div style={{ fontSize: 22, fontWeight: 800, marginTop: 5, letterSpacing: -.5 }}>{formatINR(ins.totI)}</div>
-                <div style={{ fontSize: 12, color: G.tm, marginTop: 3 }}>all time</div>
+                <div style={{ fontSize: 12, color: G.tm, marginTop: 3 }}>{insPeriod === "all" ? "all time" : insPeriod === "year" ? insYear : new Date(insMonth.year, insMonth.month).toLocaleDateString("en-IN", { month: "short" })}</div>
               </div>
             </div>
+
+            {/* Yearly bar chart — monthly breakdown */}
+            {insPeriod === "year" && yearlyBars.length > 0 && (() => {
+              const maxVal = Math.max(...yearlyBars.map(b => b.total), 1);
+              const mNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+              return (
+                <div style={{ marginBottom: 22, background: G.bg2, borderRadius: 14, padding: "16px 14px", border: `1px solid ${G.bdr}` }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 14 }}>Monthly Breakdown</div>
+                  {yearlyBars.map((b, i) => (
+                    <div key={i} onClick={() => { setInsPeriod("month"); setInsMonth({ year: insYear, month: i }); }} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, cursor: "pointer" }}>
+                      <span style={{ width: 28, fontSize: 11, fontWeight: 600, color: G.t3, flexShrink: 0 }}>{mNames[i]}</span>
+                      <div style={{ flex: 1, height: 18, background: G.bg3, borderRadius: 6, overflow: "hidden" }}>
+                        <div style={{ height: 18, borderRadius: 6, background: b.total > 0 ? G.dk : "transparent", width: `${(b.total / maxVal) * 100}%`, transition: "width .4s" }} />
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: b.total > 0 ? G.t1 : G.tm, minWidth: 55, textAlign: "right" }}>{b.total > 0 ? formatINR(b.total) : "—"}</span>
+                    </div>
+                  ))}
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10, padding: "8px 0 0", borderTop: `1px solid ${G.lt}` }}>
+                    <span style={{ fontSize: 13, color: G.t3 }}>Avg/month</span>
+                    <span style={{ fontSize: 13, fontWeight: 700 }}>{formatINR(Math.round(ins.totM / (yearlyBars.filter(b => b.total > 0).length || 1)))}</span>
+                  </div>
+                </div>
+              );
+            })()}
 
             <div style={{ marginBottom: 22 }}>
               <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>By Category <span style={{ fontSize: 12, color: G.tm, fontWeight: 400 }}>· tap to filter history</span></div>
@@ -620,7 +684,7 @@ export default function ExpenseTracker() {
                   </div>
                 );
               })}
-              {Object.keys(ins.bc).length === 0 && <div style={{ color: G.tm, padding: "14px 0", fontSize: 15 }}>No data this month</div>}
+              {Object.keys(ins.bc).length === 0 && <div style={{ color: G.tm, padding: "14px 0", fontSize: 15 }}>No data for this period</div>}
             </div>
 
             <div style={{ marginBottom: 20 }}>

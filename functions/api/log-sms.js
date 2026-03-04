@@ -59,8 +59,17 @@ export async function onRequestPost(context) {
   }
   const note = parseSmsNote(sms);
 
-  const catMap = { personal: "personal", work: "work", home: "home", savings: "investment", investment: "investment" };
-  const catId  = catMap[category] || "personal";
+  // Handle trip categories (e.g. "trip_abc123") and fixed categories
+  let catId = "personal";
+  let tripId = null;
+
+  if (category.startsWith("trip_")) {
+    tripId = category.replace("trip_", "");
+    catId = "trip";
+  } else {
+    const catMap = { personal: "personal", work: "work", home: "home", savings: "investment", investment: "investment" };
+    catId = catMap[category] || "personal";
+  }
 
   const expId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
@@ -72,14 +81,14 @@ export async function onRequestPost(context) {
     category: catId,
     pay_mode: payMode,
     date:     new Date().toISOString(),
-    trip_id:  null,
+    trip_id:  tripId,
   });
 
   if (error) {
     return new Response(JSON.stringify({ ok: false, error: error.message }), { status: 500, headers: cors });
   }
 
-  return new Response(JSON.stringify({ ok: true, amount, note, category: catId, logged_for: userId }), { headers: cors });
+  return new Response(JSON.stringify({ ok: true, amount, note, category: catId, trip_id: tripId, logged_for: userId }), { headers: cors });
 }
 
 export async function onRequestOptions() {
