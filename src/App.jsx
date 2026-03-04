@@ -161,17 +161,18 @@ export default function ExpenseTracker() {
 
   const noteSuggestions = useMemo(() => {
     const amtNum = Number(amt);
+    if (!amtNum || amtNum <= 0) return []; // only show when amount is entered
     const cutoff = Date.now() - 90 * 864e5;
     const recent = exps.filter(e => new Date(e.date).getTime() > cutoff && e.note && e.note.trim());
     const matched = recent.filter(e => {
       const sameCat = e.category === cat || (cat.startsWith("trip_") && e.tripId === cat.replace("trip_", ""));
-      const simAmt = amtNum > 0 && e.amount > 0 && Math.abs(e.amount - amtNum) / Math.max(amtNum, 1) <= 0.3;
+      const simAmt = e.amount > 0 && Math.abs(e.amount - amtNum) / Math.max(amtNum, 1) <= 0.15; // tight: ±15%
       const samePay = e.payMode === pay;
-      return sameCat || simAmt || samePay;
+      return (sameCat ? 1 : 0) + (simAmt ? 1 : 0) + (samePay ? 1 : 0) >= 2; // need ≥2 matching criteria
     });
     const freq = {};
     matched.forEach(e => { const n = e.note.trim(); freq[n] = (freq[n] || 0) + 1; });
-    return Object.entries(freq).filter(([, c]) => c >= 2).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n]) => n);
+    return Object.entries(freq).filter(([, c]) => c >= 3).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n]) => n); // ≥3 occurrences
   }, [exps, amt, cat, pay]);
 
   const sToast = useCallback((m, t = "ok") => { setToast({ m, t }); setTimeout(() => setToast(null), 1500); }, []);
@@ -213,7 +214,7 @@ export default function ExpenseTracker() {
     if (editId) {
       const orig = exps.find(e => e.id === editId);
       const updated = { ...orig, amount: v, note: note.trim(), category: tid ? "trip" : cat, payMode: pay, tripId: tid, date: editDate ? new Date(editDate + "T12:00:00").toISOString() : orig?.date };
-      setExps(p => p.map(e => e.id === editId ? updated : e));
+      setExps(p => p.map(e => e.id === editId ? updated : e).sort((a, b) => new Date(b.date) - new Date(a.date)));
       setEditId(null); setEditDate(""); sToast("Updated");
       supabase.from("expenses").update(expToDb(updated, userId)).eq("id", editId)
         .then(({ error }) => { if (error) sToast("Sync error", "err"); });
@@ -364,7 +365,8 @@ export default function ExpenseTracker() {
     const id = tRef.current.id;
     if (dy > 50) { setSw({ id: null, dir: null }); setSwipeConf(null); return; }
     if (Math.abs(dx) < 15 && el < 300) { const ex = exps.find(x => x.id === id); if (ex) setDetMod(ex); setSw({ id: null, dir: null }); setSwipeConf(null); return; }
-    if (dx < -50) { const ex = exps.find(x => x.id === id); if (ex) doEdit(ex); return; }
+    if (dx < -80) { const ex = exps.find(x => x.id === id); if (ex) doEdit(ex); return; } // long swipe → edit immediately
+    if (dx < -40) { setSw({ id, dir: "left" }); return; } // short swipe → peek edit panel
     if (dx > 50) setSw({ id, dir: "right" });
     else { setSw({ id: null, dir: null }); setSwipeConf(null); }
   }, [exps, doEdit]);
@@ -464,7 +466,21 @@ export default function ExpenseTracker() {
             </div>
 
             <div>
-              {editId && <input type="date" value={editDate} onChange={e => setEditDate(e.target.value)} style={{ width: "100%", padding: "10px 14px", borderRadius: 12, border: `2px solid ${G.bdr}`, fontSize: 15, outline: "none", boxSizing: "border-box", color: G.t1, background: G.bg2, marginBottom: 6 }} />}
+              {editId && (() => {
+                const today = new Date().toISOString().slice(0, 10);
+                const shiftDay = (n) => {
+                  const d = new Date(editDate + "T12:00:00"); d.setDate(d.getDate() + n);
+                  const s = d.toISOString().slice(0, 10); if (s <= today) setEditDate(s);
+                };
+                const lbl = (() => { const d = new Date(editDate + "T12:00:00"); if (editDate === today) return "Today"; const y = new Date(); y.setDate(y.getDate() - 1); if (sameDay(d, y)) return "Yesterday"; return d.toLocaleDateString("en-IN", { day: "numeric", month: "short" }); })();
+                return (
+                  <div style={{ display: "flex", alignItems: "center", background: G.bg2, borderRadius: 12, padding: "4px 4px", marginBottom: 6 }}>
+                    <button onClick={() => shiftDay(-1)} style={{ width: 36, height: 36, borderRadius: 9, border: "none", background: "transparent", fontSize: 18, cursor: "pointer", color: G.t1, fontWeight: 600 }}>‹</button>
+                    <div style={{ flex: 1, textAlign: "center", fontSize: 14, fontWeight: 600, color: G.t1 }}>{lbl}</div>
+                    <button onClick={() => shiftDay(1)} disabled={editDate >= today} style={{ width: 36, height: 36, borderRadius: 9, border: "none", background: "transparent", fontSize: 18, cursor: editDate >= today ? "default" : "pointer", color: editDate >= today ? G.tm : G.t1, fontWeight: 600 }}>›</button>
+                  </div>
+                );
+              })()}
               <button onClick={doSave} style={{ width: "100%", padding: "15px", borderRadius: 14, border: "none", background: G.bk, color: G.wh, fontSize: 18, fontWeight: 700, cursor: "pointer" }}>{editId ? "Update" : "Save"}</button>
               {editId && <button onClick={() => { setEditId(null); setEditDate(""); setAmt(""); setNote(""); }} style={{ width: "100%", padding: "11px", borderRadius: 12, marginTop: 5, border: `2px solid ${G.bdr}`, background: "transparent", color: G.t2, fontSize: 15, fontWeight: 600, cursor: "pointer" }}>Cancel</button>}
             </div>
@@ -538,7 +554,11 @@ export default function ExpenseTracker() {
                               {swipeConf === exp.id ? "Sure?" : "Delete"}
                             </button>
                           </div>
-                          <div style={{ ...S.expCard, transform: dir === "right" ? "translateX(80px)" : "translateX(0)" }}>
+                          {/* Swipe left → edit peek panel */}
+                          <div style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 72, background: G.md, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1, opacity: dir === "left" ? 1 : 0, transition: "opacity .15s", borderRadius: "0 12px 12px 0" }}>
+                            <button onClick={() => doEdit(exp)} style={{ background: "none", border: "none", color: G.wh, fontWeight: 700, fontSize: 12, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}><span style={{ fontSize: 20 }}>✎</span>Edit</button>
+                          </div>
+                          <div style={{ ...S.expCard, transform: dir === "left" ? "translateX(-72px)" : dir === "right" ? "translateX(80px)" : "translateX(0)" }}>
                             <div style={S.expIcon}>{getCI(exp)}</div>
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ fontWeight: 800, fontSize: 17 }}>{formatINR(exp.amount)}</div>
