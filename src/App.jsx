@@ -3,7 +3,7 @@ import { supabase, dbToExp, dbToTrip, expToDb, tripToDb } from "./supabase";
 import { useAuth } from "./AuthContext";
 import Auth, { PasswordReset } from "./Auth";
 
-const CATEGORIES = [
+const DEFAULT_CATEGORIES = [
   { id: "personal",   label: "Personal", icon: "👤" },
   { id: "work",       label: "Work",     icon: "💼" },
   { id: "home",       label: "Home",     icon: "🏠" },
@@ -82,6 +82,26 @@ export default function ExpenseTracker() {
   const [keyMod,     setKeyMod]     = useState(false);
   const [userKey,    setUserKey]    = useState(null);
   const [keyLoading, setKeyLoading] = useState(false);
+  const [cats,       setCats]       = useState(DEFAULT_CATEGORIES);
+  const [catMod,     setCatMod]     = useState(false);
+  const [editCats,   setEditCats]   = useState(DEFAULT_CATEGORIES);
+  const [catSaving,  setCatSaving]  = useState(false);
+  // Persisted feedback: counts how many times the user has chosen each note from a suggestion/autocomplete.
+  // Stored in localStorage so it accumulates across sessions without needing a DB migration.
+  const [noteFeedback, setNoteFeedback] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("note_feedback") || "{}"); }
+    catch { return {}; }
+  });
+  // Call whenever the user explicitly picks a note from either suggestion chip or autocomplete list.
+  const trackNoteChosen = useCallback((n) => {
+    if (!n) return;
+    setNoteFeedback(prev => {
+      const updated = { ...prev, [n]: { count: (prev[n]?.count || 0) + 1, lastUsed: Date.now() } };
+      try { localStorage.setItem("note_feedback", JSON.stringify(updated)); } catch {}
+      return updated;
+    });
+  }, []);
+
   const aRef = useRef(null);
   const tRef = useRef({});
   const mRef = useRef({}); // modal swipe-down tracking
@@ -93,12 +113,24 @@ export default function ExpenseTracker() {
     let expsChannel, tripsChannel;
 
     const init = async () => {
-      const [{ data: expRows }, { data: tripRows }] = await Promise.all([
+      const [{ data: expRows }, { data: tripRows }, { data: prefsRow }] = await Promise.all([
         supabase.from("expenses").select("*").eq("user_id", userId).order("date", { ascending: false }),
         supabase.from("trips").select("*").eq("user_id", userId).order("created_at", { ascending: false }),
+        supabase.from("user_prefs").select("cats_json").eq("user_id", userId).maybeSingle(),
       ]);
       setExps((expRows  || []).map(dbToExp));
       setTrips((tripRows || []).map(dbToTrip));
+      if (prefsRow?.cats_json) {
+        try {
+          const saved = JSON.parse(prefsRow.cats_json);
+          // merge: keep IDs + order from defaults, apply saved label/icon
+          const merged = DEFAULT_CATEGORIES.map(def => {
+            const s = saved.find(x => x.id === def.id);
+            return s ? { ...def, label: s.label || def.label, icon: s.icon || def.icon } : def;
+          });
+          setCats(merged);
+        } catch {}
+      }
       setDbReady(true);
 
       expsChannel = supabase.channel(`exp:${userId}`)
@@ -142,14 +174,14 @@ export default function ExpenseTracker() {
   [trips, getTAct]);
 
   const addCats = useMemo(() => [
-    ...CATEGORIES,
+    ...cats,
     ...activeTrips.map(t => ({ id: `trip_${t.id}`, label: t.name, icon: "\u2708\uFE0F", isTrip: true })),
-  ], [activeTrips]);
+  ], [cats, activeTrips]);
 
   const allCats = useMemo(() => [
-    ...CATEGORIES,
+    ...cats,
     ...[...activeTrips, ...inactiveTrips].map(t => ({ id: `trip_${t.id}`, label: t.name, icon: "\u2708\uFE0F", isTrip: true })),
-  ], [activeTrips, inactiveTrips]);
+  ], [cats, activeTrips, inactiveTrips]);
 
   const quickAmts = useMemo(() => {
     const cutoff = Date.now() - 365 * 864e5;
@@ -160,21 +192,90 @@ export default function ExpenseTracker() {
     return s.length >= 3 ? s : [100, 200, 500, 1000, 2000];
   }, [exps]);
 
+  // Smart context suggestions — shown when note is EMPTY and amount is filled.
+  // Scores each candidate note by multiple signals with recency decay; shows nothing
+  // rather than a low-confidence guess (quality gate on final score).
   const noteSuggestions = useMemo(() => {
     const amtNum = Number(amt);
-    if (!amtNum || amtNum <= 0) return []; // only show when amount is entered
-    const cutoff = Date.now() - 90 * 864e5;
+    if (!amtNum || amtNum <= 0) return [];
+    const now = Date.now();
+    const cutoff = now - 90 * 864e5;
     const recent = exps.filter(e => new Date(e.date).getTime() > cutoff && e.note && e.note.trim());
-    const matched = recent.filter(e => {
+    if (recent.length === 0) return [];
+    const nowDate = new Date();
+    const nowDow = nowDate.getDay();
+    // Time-of-day bucket: 0=morning(5-11), 1=afternoon(12-17), 2=evening(18+), 3=night(<5)
+    const todBucket = (h) => h >= 5 && h < 12 ? 0 : h >= 12 && h < 18 ? 1 : h >= 18 ? 2 : 3;
+    const nowTod = todBucket(nowDate.getHours());
+    const scores = {}, freqs = {};
+    recent.forEach(e => {
+      const n = e.note.trim();
+      const eDate = new Date(e.date);
       const sameCat = e.category === cat || (cat.startsWith("trip_") && e.tripId === cat.replace("trip_", ""));
-      const simAmt = e.amount > 0 && Math.abs(e.amount - amtNum) / Math.max(amtNum, 1) <= 0.15; // tight: ±15%
+      const amtRatio = e.amount > 0 ? Math.abs(e.amount - amtNum) / Math.max(amtNum, e.amount) : 1;
+      const simAmt = amtRatio <= 0.20;
+      const verySimAmt = amtRatio <= 0.05;
       const samePay = e.payMode === pay;
-      return (sameCat ? 1 : 0) + (simAmt ? 1 : 0) + (samePay ? 1 : 0) >= 2; // need ≥2 matching criteria
+      // Require at least 2 hard signals to suppress noise entirely
+      if ((sameCat ? 1 : 0) + (simAmt ? 1 : 0) + (samePay ? 1 : 0) < 2) return;
+      // Exponential recency decay: half-life ~21 days (recent entries count much more)
+      const recency = Math.exp(-(now - eDate.getTime()) / (21 * 864e5));
+      // Context score: category is the strongest signal, then amount precision, then mode
+      const ctx = (sameCat ? 4 : 0)
+        + (verySimAmt ? 3 : simAmt ? 1.5 : 0)
+        + (samePay ? 1.5 : 0)
+        + (eDate.getDay() === nowDow ? 0.7 : 0)          // weekly habit bonus
+        + (todBucket(eDate.getHours()) === nowTod ? 0.3 : 0); // time-of-day bonus
+      scores[n] = (scores[n] || 0) + ctx * recency;
+      freqs[n] = (freqs[n] || 0) + 1;
     });
-    const freq = {};
-    matched.forEach(e => { const n = e.note.trim(); freq[n] = (freq[n] || 0) + 1; });
-    return Object.entries(freq).filter(([, c]) => c >= 3).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n]) => n); // ≥3 occurrences
-  }, [exps, amt, cat, pay]);
+    // Final score: context × log(frequency) × user-choice feedback boost.
+    // Quality gate (≥1.5) ensures we show nothing rather than a weak suggestion.
+    return Object.entries(scores)
+      .map(([n, sc]) => {
+        const fb = noteFeedback[n];
+        // Each past user choice adds a logarithmic boost (max ~+60% at 10 picks)
+        const fbBoost = fb ? 1 + 0.4 * Math.log1p(fb.count) : 1;
+        return { n, score: sc * Math.log1p(freqs[n]) * fbBoost };
+      })
+      .filter(({ score }) => score >= 1.5)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .map(({ n }) => n);
+  }, [exps, amt, cat, pay, noteFeedback]);
+
+  // Context-aware typing autocomplete — activates after 20 entries (enough history to be
+  // meaningful), scores prefix-matching completions by recency + context signals so the
+  // most relevant completion rises to the top. Trivial completions (<2 chars remaining)
+  // are suppressed. Max 3 items so it never crowds the screen.
+  const NOTE_AUTOFILL_MIN = 20;
+  const noteAutocomplete = useMemo(() => {
+    if (exps.length < NOTE_AUTOFILL_MIN) return [];
+    if (!note || note.length < 2) return [];
+    const q = note.toLowerCase();
+    const amtNum = Number(amt);
+    const now = Date.now();
+    const scores = {};
+    exps.forEach(e => {
+      const n = (e.note || "").trim();
+      if (!n || !n.toLowerCase().startsWith(q) || n.toLowerCase() === q) return;
+      if (n.slice(note.length).length < 2) return; // completion too trivial
+      const recency = Math.exp(-(now - new Date(e.date).getTime()) / (30 * 864e5));
+      const sameCat = e.category === cat || (cat.startsWith("trip_") && e.tripId === cat.replace("trip_", ""));
+      const amtRatio = amtNum > 0 && e.amount > 0 ? Math.abs(e.amount - amtNum) / Math.max(amtNum, e.amount) : 1;
+      const ctxBonus = (sameCat ? 2 : 0) + (amtRatio <= 0.25 ? 1 : 0) + (e.payMode === pay ? 0.5 : 0);
+      scores[n] = (scores[n] || 0) + (1 + ctxBonus) * recency;
+    });
+    return Object.entries(scores)
+      .map(([n, sc]) => {
+        const fb = noteFeedback[n];
+        const fbBoost = fb ? 1 + 0.4 * Math.log1p(fb.count) : 1;
+        return [n, sc * fbBoost];
+      })
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([n]) => n);
+  }, [exps, note, amt, cat, pay, noteFeedback]);
 
   const sToast = useCallback((m, t = "ok") => { setToast({ m, t }); setTimeout(() => setToast(null), 1500); }, []);
 
@@ -205,6 +306,134 @@ export default function ExpenseTracker() {
     if (!userKey) return;
     navigator.clipboard?.writeText(userKey).then(() => sToast("Copied!")).catch(() => sToast("Copy failed", "err"));
   }, [userKey, sToast]);
+
+  // ── Export ────────────────────────────────────────────────────────────────
+  const doExportPDF = useCallback(() => {
+    if (filtered.length === 0) return;
+    const getCatLabel = (e) => {
+      if (e.tripId) { const t = trips.find(x => x.id === e.tripId); return t ? t.name : "Trip"; }
+      return cats.find(c => c.id === e.category)?.label || e.category;
+    };
+    const periodLabel = selTrip
+      ? `Trip: ${trips.find(t => t.id === selTrip)?.name || ""}`
+      : fCat !== "all" ? (allCats.find(c => c.id === fCat)?.label || "Category") : "All Categories";
+    const dates = filtered.map(e => new Date(e.date).getTime());
+    const dateRange = sameDay(Math.min(...dates), Math.max(...dates))
+      ? tds(Math.min(...dates))
+      : `${tds(Math.min(...dates))} \u2013 ${tds(Math.max(...dates))}`;
+    const total = filtered.reduce((s, e) => s + e.amount, 0);
+    const generated = new Date().toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
+    const fileName = `Gurjar-Books-${periodLabel.replace(/[^\w]/g, "-")}-${new Date().toISOString().slice(0, 10)}`;
+    const rows = [...filtered].reverse().map(e => `
+      <tr>
+        <td>${tds(e.date)}</td>
+        <td class="t2">${tts(e.date)}</td>
+        <td>${getCatLabel(e)}</td>
+        <td>${e.note ? e.note.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : "<span class='em'>\u2014</span>"}</td>
+        <td class="t2">${e.payMode === "cash" ? "Cash" : "Bank"}</td>
+        <td class="amt">\u20B9${e.amount.toLocaleString("en-IN")}</td>
+      </tr>`).join("");
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>${fileName}</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif; color: #111; padding: 28px 32px; font-size: 13px; line-height: 1.5; }
+.header { padding-bottom: 14px; margin-bottom: 20px; border-bottom: 2.5px solid #111; }
+.brand { font-size: 20px; font-weight: 800; letter-spacing: -0.5px; }
+.subtitle { font-size: 15px; font-weight: 700; color: #333; margin-top: 6px; }
+.meta { font-size: 11.5px; color: #666; margin-top: 4px; }
+table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 12.5px; }
+thead th { background: #111; color: #fff; padding: 8px 10px; font-size: 11px; font-weight: 700; letter-spacing: 0.7px; text-transform: uppercase; text-align: left; }
+thead th.r { text-align: right; }
+td { padding: 7px 10px; border-bottom: 1px solid #EBEBEB; vertical-align: top; }
+tr:nth-child(even) td { background: #F8F8F8; }
+td.amt { text-align: right; font-weight: 700; white-space: nowrap; }
+td.t2 { color: #666; white-space: nowrap; }
+.em { color: #AAA; }
+.summary { display: flex; justify-content: space-between; align-items: flex-end; padding-top: 14px; border-top: 2px solid #111; }
+.sum-label { font-size: 11px; font-weight: 700; color: #666; letter-spacing: 0.8px; text-transform: uppercase; }
+.sum-total { font-size: 26px; font-weight: 800; letter-spacing: -0.5px; margin-top: 3px; }
+.sum-meta { font-size: 12px; color: #888; }
+.footer { margin-top: 24px; font-size: 10px; color: #BBB; text-align: center; }
+@media print { body { padding: 0; } @page { margin: 1.5cm; size: A4 portrait; } }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="brand">\u20B9 Gurjar Books</div>
+  <div class="subtitle">Expense Report &middot; ${periodLabel}</div>
+  <div class="meta">Period: <b>${dateRange}</b> &nbsp;&middot;&nbsp; Generated: ${generated}${fPay !== "all" ? ` &nbsp;&middot;&nbsp; ${fPay === "cash" ? "Cash" : "Bank"} only` : ""}</div>
+</div>
+<table>
+  <thead>
+    <tr>
+      <th>Date</th>
+      <th>Time</th>
+      <th>Category</th>
+      <th>Note</th>
+      <th>Mode</th>
+      <th class="r">Amount</th>
+    </tr>
+  </thead>
+  <tbody>${rows}</tbody>
+</table>
+<div class="summary">
+  <div class="sum-meta">${filtered.length} entr${filtered.length === 1 ? "y" : "ies"}</div>
+  <div style="text-align:right">
+    <div class="sum-label">Total</div>
+    <div class="sum-total">\u20B9${total.toLocaleString("en-IN")}</div>
+  </div>
+</div>
+<div class="footer">Gurjar Books Expense Tracker &nbsp;&middot;&nbsp; expenses.gurjarbooks.com</div>
+<script>document.title = "${fileName}"; window.addEventListener("load", () => setTimeout(() => window.print(), 250));<\/script>
+</body>
+</html>`;
+    const win = window.open("", "_blank");
+    if (win) { win.document.write(html); win.document.close(); }
+    else sToast("Allow pop-ups to export PDF", "err");
+  }, [filtered, cats, trips, selTrip, fCat, fPay, allCats, sToast]);
+
+  const doExportCSV = useCallback(() => {
+    if (filtered.length === 0) return;
+    const getCatLabel = (e) => {
+      if (e.tripId) { const t = trips.find(x => x.id === e.tripId); return t ? t.name : "Trip"; }
+      return cats.find(c => c.id === e.category)?.label || e.category;
+    };
+    const esc = (v) => `"${String(v).replace(/"/g, '""')}"`;
+    const header = ["Date", "Time", "Category", "Note", "Payment Mode", "Amount (INR)"].join(",");
+    const csvRows = [...filtered].reverse().map(e =>
+      [tds(e.date), tts(e.date), esc(getCatLabel(e)), esc(e.note || ""), e.payMode === "cash" ? "Cash" : "Bank", e.amount].join(",")
+    );
+    const csv = [header, ...csvRows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `Gurjar-Books-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+    URL.revokeObjectURL(url);
+    sToast("CSV downloaded");
+  }, [filtered, cats, trips, sToast]);
+
+  // ── Custom categories ─────────────────────────────────────────────────────
+  const openCatMod = useCallback(() => {
+    setEditCats(cats.map(c => ({ ...c })));
+    setCatMod(true);
+  }, [cats]);
+
+  const saveCustomCats = useCallback(async () => {
+    setCatSaving(true);
+    const cleaned = editCats.map(c => {
+      const def = DEFAULT_CATEGORIES.find(d => d.id === c.id);
+      if (c.id === "investment") return { ...def }; // always keep default for investment
+      return { id: c.id, label: c.label.trim() || def.label, icon: c.icon.trim() || def.icon };
+    });
+    setCats(cleaned);
+    setCatMod(false);
+    setCatSaving(false);
+    await supabase.from("user_prefs").upsert({ user_id: userId, cats_json: JSON.stringify(cleaned) });
+  }, [editCats, userId]);
 
   // ── CRUD — all optimistic ─────────────────────────────────────────────────
   const doSave = useCallback(async () => {
@@ -398,8 +627,8 @@ export default function ExpenseTracker() {
     else { setSw({ id: null, dir: null }); setSwipeConf(null); }
   }, [exps, doEdit]);
 
-  const getCL = (e) => { if (e.tripId) { const t = trips.find(x => x.id === e.tripId); return t ? t.name : "Trip"; } return CATEGORIES.find(c => c.id === e.category)?.label || e.category; };
-  const getCI = (e) => { if (e.tripId) return "\u2708\uFE0F"; return CATEGORIES.find(c => c.id === e.category)?.icon || "?"; };
+  const getCL = (e) => { if (e.tripId) { const t = trips.find(x => x.id === e.tripId); return t ? t.name : "Trip"; } return cats.find(c => c.id === e.category)?.label || e.category; };
+  const getCI = (e) => { if (e.tripId) return "\u2708\uFE0F"; return cats.find(c => c.id === e.category)?.icon || "?"; };
 
   const navTo = (t) => { hap(); if (t === "list") { setSelTrip(null); setFCat("all"); setFPay("all"); setSq(""); } setSw({ id: null, dir: null }); setSwipeConf(null); setView(t); };
   const viewTH = (tid) => { setSelTrip(tid); setFCat("all"); setFPay("all"); setSq(""); setView("list"); };
@@ -466,7 +695,10 @@ export default function ExpenseTracker() {
             </div>
 
             <div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: G.t3, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 6 }}>Category</div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: G.t3, textTransform: "uppercase", letterSpacing: 1.5 }}>Category</div>
+                <button onClick={openCatMod} title="Customise categories" style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: G.tm, padding: "2px 4px", lineHeight: 1, fontWeight: 600 }}>✎ edit</button>
+              </div>
               <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
                 {addCats.map(c => B(cat === c.id, c.label, () => { hap(); setCat(c.id); }))}
               </div>
@@ -481,12 +713,26 @@ export default function ExpenseTracker() {
               </div>
             </div>
 
-            <div>
-              <input type="text" placeholder="Note (optional)" value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === "Enter") doSave(); }} style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `2px solid ${G.bdr}`, fontSize: 16, outline: "none", boxSizing: "border-box", color: G.t1, background: G.bg2 }} autoComplete="off" />
+            <div style={{ position: "relative" }}>
+              <div style={{ position: "relative" }}>
+                <input type="text" placeholder="Note (optional)" value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === "Enter") doSave(); if (e.key === "Tab" && noteAutocomplete.length > 0) { e.preventDefault(); hap(); trackNoteChosen(noteAutocomplete[0]); setNote(noteAutocomplete[0]); } }} style={{ width: "100%", padding: "12px 14px", paddingRight: note ? "38px" : "14px", borderRadius: 12, border: `2px solid ${G.bdr}`, fontSize: 16, outline: "none", boxSizing: "border-box", color: G.t1, background: G.bg2 }} autoComplete="off" />
+                {note && <button onClick={() => { hap(); setNote(""); }} tabIndex={-1} style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", fontSize: 18, color: G.tm, padding: "0 2px", lineHeight: 1, zIndex: 1 }}>{"\u2715"}</button>}
+              </div>
+              {/* Autocomplete dropdown: shows while typing (after 3 entries) */}
+              {noteAutocomplete.length > 0 && (
+                <div style={{ position: "absolute", left: 0, right: 0, top: "100%", marginTop: 3, background: G.bg, border: `1.5px solid ${G.bdr}`, borderRadius: 12, zIndex: 50, overflow: "hidden", boxShadow: "0 4px 16px rgba(0,0,0,.10)" }}>
+                  {noteAutocomplete.map((s, i) => (
+                    <button key={s} onPointerDown={e => { e.preventDefault(); hap(); trackNoteChosen(s); setNote(s); }} style={{ display: "block", width: "100%", padding: "11px 14px", border: "none", borderTop: i > 0 ? `1px solid ${G.lt}` : "none", background: "transparent", textAlign: "left", fontSize: 15, color: G.t1, cursor: "pointer", fontWeight: i === 0 ? 600 : 400 }}>
+                      <span style={{ color: G.t3 }}>{note}</span>{s.slice(note.length)}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Context suggestions: shows when note is empty & amount is filled */}
               {noteSuggestions.length > 0 && !note && (
                 <div style={{ display: "flex", gap: 6, overflowX: "auto", marginTop: 6, paddingBottom: 2, WebkitOverflowScrolling: "touch" }}>
                   {noteSuggestions.map(s => (
-                    <button key={s} onClick={() => { hap(); setNote(s); }} style={{ padding: "5px 12px", borderRadius: 16, border: `1.5px solid ${G.bdr}`, background: G.bg2, color: G.t2, fontSize: 12, fontWeight: 500, whiteSpace: "nowrap", cursor: "pointer", flexShrink: 0 }}>{s}</button>
+                    <button key={s} onClick={() => { hap(); trackNoteChosen(s); setNote(s); }} style={{ padding: "5px 12px", borderRadius: 16, border: `1.5px solid ${G.bdr}`, background: G.bg2, color: G.t2, fontSize: 12, fontWeight: 500, whiteSpace: "nowrap", cursor: "pointer", flexShrink: 0 }}>{s}</button>
                   ))}
                 </div>
               )}
@@ -554,7 +800,13 @@ export default function ExpenseTracker() {
                 if (sameDay(oldest, newest)) return ` · ${dayLbl(oldest)}`;
                 return ` · ${oldest.toLocaleDateString("en-IN", { day: "numeric", month: "short" })} – ${newest.toLocaleDateString("en-IN", { day: "numeric", month: "short" })}`;
               })()}</span>
-              <span style={{ fontWeight: 800, fontSize: 16, color: G.t1 }}>{formatINR(filtered.reduce((s, e) => s + e.amount, 0))}</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                {filtered.length > 0 && (<>
+                  <button onClick={doExportCSV} style={{ background: "none", border: `1.5px solid ${G.bdr}`, borderRadius: 8, padding: "3px 9px", fontSize: 11, fontWeight: 700, color: G.t3, cursor: "pointer", letterSpacing: 0.3 }}>CSV</button>
+                  <button onClick={doExportPDF} style={{ background: G.bg2, border: `1.5px solid ${G.bdr}`, borderRadius: 8, padding: "3px 9px", fontSize: 11, fontWeight: 700, color: G.t2, cursor: "pointer", letterSpacing: 0.3 }}>PDF</button>
+                </>)}
+                <span style={{ fontWeight: 800, fontSize: 16, color: G.t1 }}>{formatINR(filtered.reduce((s, e) => s + e.amount, 0))}</span>
+              </div>
             </div>
 
             {filtered.length === 0 ? (
@@ -674,7 +926,7 @@ export default function ExpenseTracker() {
             <div style={{ marginBottom: 22 }}>
               <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>By Category <span style={{ fontSize: 12, color: G.tm, fontWeight: 400 }}>· tap to filter history</span></div>
               {Object.entries(ins.bc).sort((a, b) => b[1] - a[1]).map(([cid, a]) => {
-                const c = allCats.find(x => x.id === cid) || CATEGORIES[0];
+                const c = allCats.find(x => x.id === cid) || cats[0];
                 const p = ins.totM > 0 ? (a / ins.totM * 100) : 0;
                 return (
                   <div key={cid} onClick={() => { hap(); setSelTrip(null); setFPay("all"); setSq(""); setFCat(cid); setSw({ id: null, dir: null }); setSwipeConf(null); setView("list"); }} style={{ marginBottom: 14, cursor: "pointer" }}>
@@ -894,6 +1146,41 @@ export default function ExpenseTracker() {
               <div>3. Edit your bank SMS shortcut</div>
               <div>4. Set the <b>key</b> field to your copied key</div>
               <div>5. Done — bank SMS will auto-log expenses</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════ CATEGORY EDIT MODAL ══════ */}
+      {catMod && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 999 }} onClick={() => setCatMod(false)}>
+          <div style={{ width: "100%", maxWidth: 390, background: G.bg, borderRadius: "20px 20px 0 0", padding: "24px 20px 40px", maxHeight: "80vh", overflowY: "auto" }} onClick={e => e.stopPropagation()}>
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: G.lt, margin: "0 auto 18px" }} />
+            <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 4 }}>Customise Categories</div>
+            <div style={{ fontSize: 13, color: G.t3, marginBottom: 20 }}>Change labels and icons. Your existing entries are unaffected.</div>
+            {editCats.map((c, i) => {
+              const locked = c.id === "investment";
+              return (
+                <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                  {locked ? (
+                    <div style={{ width: 46, padding: "10px 0", borderRadius: 10, border: `2px solid ${G.lt}`, fontSize: 22, textAlign: "center", background: G.bg3, color: G.t3, boxSizing: "border-box", flexShrink: 0 }}>{c.icon}</div>
+                  ) : (
+                    <input type="text" value={c.icon} onChange={e => setEditCats(p => p.map((x, j) => j === i ? { ...x, icon: e.target.value } : x))} maxLength={2} style={{ width: 46, padding: "10px 0", borderRadius: 10, border: `2px solid ${G.bdr}`, fontSize: 22, outline: "none", textAlign: "center", background: G.bg2, color: G.t1, boxSizing: "border-box", flexShrink: 0 }} />
+                  )}
+                  {locked ? (
+                    <div style={{ flex: 1, padding: "10px 14px", borderRadius: 10, border: `2px solid ${G.lt}`, fontSize: 16, background: G.bg3, color: G.t3, boxSizing: "border-box", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span>{c.label}</span>
+                      <span style={{ fontSize: 11, color: G.tm, fontWeight: 600, letterSpacing: 0.3 }}>default · locked</span>
+                    </div>
+                  ) : (
+                    <input type="text" value={c.label} onChange={e => setEditCats(p => p.map((x, j) => j === i ? { ...x, label: e.target.value } : x))} maxLength={14} placeholder={DEFAULT_CATEGORIES[i].label} style={{ flex: 1, padding: "10px 14px", borderRadius: 10, border: `2px solid ${G.bdr}`, fontSize: 16, outline: "none", background: G.bg2, color: G.t1, boxSizing: "border-box" }} />
+                  )}
+                </div>
+              );
+            })}
+            <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+              <button onClick={() => setEditCats(DEFAULT_CATEGORIES.map(c => ({ ...c })))} style={{ padding: "12px 18px", borderRadius: 12, border: `2px solid ${G.bdr}`, background: G.bg, color: G.t3, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Reset</button>
+              <button onClick={saveCustomCats} disabled={catSaving} style={{ flex: 1, padding: "12px", borderRadius: 12, border: "none", background: G.bk, color: G.wh, fontSize: 16, fontWeight: 700, cursor: "pointer" }}>{catSaving ? "Saving…" : "Save"}</button>
             </div>
           </div>
         </div>
