@@ -306,6 +306,115 @@ export default function ExpenseTracker() {
     navigator.clipboard?.writeText(userKey).then(() => sToast("Copied!")).catch(() => sToast("Copy failed", "err"));
   }, [userKey, sToast]);
 
+  // ── CRUD — all optimistic ─────────────────────────────────────────────────
+  const doSave = useCallback(async () => {
+    const v = Math.round(Number(amt));
+    if (!v || v <= 0) { sToast("Enter amount", "err"); return; }
+    hap();
+    const tid = cat.startsWith("trip_") ? cat.replace("trip_", "") : null;
+    if (editId) {
+      const orig = exps.find(e => e.id === editId);
+      const updated = { ...orig, amount: v, note: note.trim(), category: tid ? "trip" : cat, payMode: pay, tripId: tid, date: editDate ? new Date(editDate + "T12:00:00").toISOString() : orig?.date };
+      setExps(p => p.map(e => e.id === editId ? updated : e).sort((a, b) => new Date(b.date) - new Date(a.date)));
+      setEditId(null); setEditDate(""); sToast("Updated");
+      supabase.from("expenses").update(expToDb(updated, userId)).eq("id", editId)
+        .then(({ error }) => { if (error) sToast("Sync error", "err"); });
+    } else {
+      const newExp = {
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        amount: v, note: note.trim(), category: tid ? "trip" : cat,
+        payMode: pay, date: new Date().toISOString(), tripId: tid,
+      };
+      setExps(p => [newExp, ...p]);
+      sToast(`${formatINR(v)} saved`);
+      supabase.from("expenses").insert(expToDb(newExp, userId))
+        .then(({ error }) => { if (error) sToast("Sync error", "err"); });
+    }
+    setAmt(""); setNote("");
+    setTimeout(() => aRef.current?.focus(), 50);
+  }, [amt, cat, note, pay, editId, editDate, exps, userId, sToast]);
+
+  const doDel = useCallback((id) => {
+    hap();
+    setExps(p => p.filter(e => e.id !== id));
+    setSw({ id: null, dir: null }); setSwipeConf(null); setDetMod(null);
+    sToast("Deleted", "err");
+    supabase.from("expenses").delete().eq("id", id)
+      .then(({ error }) => { if (error) sToast("Sync error", "err"); });
+  }, [sToast]);
+
+  const doEdit = useCallback((exp) => {
+    setAmt(exp.amount.toString()); setNote(exp.note || "");
+    setCat(exp.tripId ? `trip_${exp.tripId}` : exp.category);
+    setPay(exp.payMode); setEditId(exp.id);
+    setEditDate(new Date(exp.date).toISOString().slice(0, 10));
+    setView("add");
+    setSw({ id: null, dir: null }); setDetMod(null);
+  }, []);
+
+  const doSaveTrip = useCallback(async () => {
+    if (!tName.trim()) return; hap();
+    if (editTripId) {
+      const updatedTrip = { ...trips.find(t => t.id === editTripId), name: tName.trim(), budget: Math.round(Number(tBudg)) || 0 };
+      setTrips(p => p.map(t => t.id === editTripId ? updatedTrip : t));
+      setEditTripId(null); sToast("Trip updated");
+      supabase.from("trips").update(tripToDb(updatedTrip, userId)).eq("id", editTripId)
+        .then(({ error }) => { if (error) sToast("Sync error", "err"); });
+    } else {
+      const newTrip = { id: Date.now().toString(36), name: tName.trim(), budget: Math.round(Number(tBudg)) || 0, createdAt: new Date().toISOString(), pinned: false, archived: false };
+      setTrips(p => [...p, newTrip]);
+      sToast("Trip created");
+      supabase.from("trips").insert(tripToDb(newTrip, userId))
+        .then(({ error }) => { if (error) sToast("Sync error", "err"); });
+    }
+    setTName(""); setTBudg(""); setTripMod(false);
+  }, [tName, tBudg, editTripId, trips, userId, sToast]);
+
+  const canDelTrip = useCallback((t) => hSince(t.createdAt) <= 48 || !exps.some(e => e.tripId === t.id), [exps]);
+
+  const doDelTrip = useCallback((t) => {
+    if (!canDelTrip(t)) { sToast("Has entries & >48hrs", "err"); return; }
+    setTrips(p => p.map(x => x.id === t.id ? { ...x, archived: true } : x));
+    setExps(p => p.map(e => e.tripId === t.id ? { ...e, tripId: null, category: "personal" } : e));
+    setConfDel(null); setTripDet(null); sToast("Trip deleted");
+    supabase.from("trips").update({ archived: true }).eq("id", t.id)
+      .then(({ error }) => { if (error) sToast("Sync error", "err"); });
+    supabase.from("expenses").update({ trip_id: null, category: "personal" }).eq("trip_id", t.id)
+      .then(({ error }) => { if (error) sToast("Sync error", "err"); });
+  }, [canDelTrip, sToast]);
+
+  const pinT = useCallback((id) => {
+    setTrips(p => p.map(t => t.id === id ? { ...t, pinned: true } : t)); sToast("Pinned");
+    supabase.from("trips").update({ pinned: true }).eq("id", id)
+      .then(({ error }) => { if (error) sToast("Sync error", "err"); });
+  }, [sToast]);
+
+  const unpinT = useCallback((id) => {
+    setTrips(p => p.map(t => t.id === id ? { ...t, pinned: false } : t)); sToast("Unpinned");
+    supabase.from("trips").update({ pinned: false }).eq("id", id)
+      .then(({ error }) => { if (error) sToast("Sync error", "err"); });
+  }, [sToast]);
+
+  // ── Filtered list ─────────────────────────────────────────────────────────
+  const filtered = useMemo(() => {
+    let l = [...exps];
+    if (selTrip) l = l.filter(e => e.tripId === selTrip);
+    else if (fCat !== "all") {
+      if (fCat.startsWith("trip_")) l = l.filter(e => e.tripId === fCat.replace("trip_", ""));
+      else l = l.filter(e => e.category === fCat && !e.tripId);
+    }
+    if (fPay !== "all") l = l.filter(e => e.payMode === fPay);
+    if (sq.trim()) {
+      const q = sq.toLowerCase();
+      l = l.filter(e => {
+        const catLabel = (allCats.find(c => c.id === (e.tripId ? `trip_${e.tripId}` : e.category))?.label || "").toLowerCase();
+        const payLabel = (PAY.find(p => p.id === e.payMode)?.label || e.payMode).toLowerCase();
+        return (e.note || "").toLowerCase().includes(q) || e.amount.toString().includes(q) || catLabel.includes(q) || payLabel.includes(q);
+      });
+    }
+    return l;
+  }, [exps, fCat, fPay, sq, selTrip, allCats]);
+
   // ── Export ────────────────────────────────────────────────────────────────
   const doExportPDF = useCallback(() => {
     if (filtered.length === 0) return;
@@ -434,115 +543,6 @@ td.t2 { color: #666; white-space: nowrap; }
     setCatSaving(false);
     if (error) sToast("Sync error", "err");
   }, [editCats, userId, sToast]);
-
-  // ── CRUD — all optimistic ─────────────────────────────────────────────────
-  const doSave = useCallback(async () => {
-    const v = Math.round(Number(amt));
-    if (!v || v <= 0) { sToast("Enter amount", "err"); return; }
-    hap();
-    const tid = cat.startsWith("trip_") ? cat.replace("trip_", "") : null;
-    if (editId) {
-      const orig = exps.find(e => e.id === editId);
-      const updated = { ...orig, amount: v, note: note.trim(), category: tid ? "trip" : cat, payMode: pay, tripId: tid, date: editDate ? new Date(editDate + "T12:00:00").toISOString() : orig?.date };
-      setExps(p => p.map(e => e.id === editId ? updated : e).sort((a, b) => new Date(b.date) - new Date(a.date)));
-      setEditId(null); setEditDate(""); sToast("Updated");
-      supabase.from("expenses").update(expToDb(updated, userId)).eq("id", editId)
-        .then(({ error }) => { if (error) sToast("Sync error", "err"); });
-    } else {
-      const newExp = {
-        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-        amount: v, note: note.trim(), category: tid ? "trip" : cat,
-        payMode: pay, date: new Date().toISOString(), tripId: tid,
-      };
-      setExps(p => [newExp, ...p]);
-      sToast(`${formatINR(v)} saved`);
-      supabase.from("expenses").insert(expToDb(newExp, userId))
-        .then(({ error }) => { if (error) sToast("Sync error", "err"); });
-    }
-    setAmt(""); setNote("");
-    setTimeout(() => aRef.current?.focus(), 50);
-  }, [amt, cat, note, pay, editId, editDate, exps, userId, sToast]);
-
-  const doDel = useCallback((id) => {
-    hap();
-    setExps(p => p.filter(e => e.id !== id));
-    setSw({ id: null, dir: null }); setSwipeConf(null); setDetMod(null);
-    sToast("Deleted", "err");
-    supabase.from("expenses").delete().eq("id", id)
-      .then(({ error }) => { if (error) sToast("Sync error", "err"); });
-  }, [sToast]);
-
-  const doEdit = useCallback((exp) => {
-    setAmt(exp.amount.toString()); setNote(exp.note || "");
-    setCat(exp.tripId ? `trip_${exp.tripId}` : exp.category);
-    setPay(exp.payMode); setEditId(exp.id);
-    setEditDate(new Date(exp.date).toISOString().slice(0, 10));
-    setView("add");
-    setSw({ id: null, dir: null }); setDetMod(null);
-  }, []);
-
-  const doSaveTrip = useCallback(async () => {
-    if (!tName.trim()) return; hap();
-    if (editTripId) {
-      const updatedTrip = { ...trips.find(t => t.id === editTripId), name: tName.trim(), budget: Math.round(Number(tBudg)) || 0 };
-      setTrips(p => p.map(t => t.id === editTripId ? updatedTrip : t));
-      setEditTripId(null); sToast("Trip updated");
-      supabase.from("trips").update(tripToDb(updatedTrip, userId)).eq("id", editTripId)
-        .then(({ error }) => { if (error) sToast("Sync error", "err"); });
-    } else {
-      const newTrip = { id: Date.now().toString(36), name: tName.trim(), budget: Math.round(Number(tBudg)) || 0, createdAt: new Date().toISOString(), pinned: false, archived: false };
-      setTrips(p => [...p, newTrip]);
-      sToast("Trip created");
-      supabase.from("trips").insert(tripToDb(newTrip, userId))
-        .then(({ error }) => { if (error) sToast("Sync error", "err"); });
-    }
-    setTName(""); setTBudg(""); setTripMod(false);
-  }, [tName, tBudg, editTripId, trips, userId, sToast]);
-
-  const canDelTrip = useCallback((t) => hSince(t.createdAt) <= 48 || !exps.some(e => e.tripId === t.id), [exps]);
-
-  const doDelTrip = useCallback((t) => {
-    if (!canDelTrip(t)) { sToast("Has entries & >48hrs", "err"); return; }
-    setTrips(p => p.map(x => x.id === t.id ? { ...x, archived: true } : x));
-    setExps(p => p.map(e => e.tripId === t.id ? { ...e, tripId: null, category: "personal" } : e));
-    setConfDel(null); setTripDet(null); sToast("Trip deleted");
-    supabase.from("trips").update({ archived: true }).eq("id", t.id)
-      .then(({ error }) => { if (error) sToast("Sync error", "err"); });
-    supabase.from("expenses").update({ trip_id: null, category: "personal" }).eq("trip_id", t.id)
-      .then(({ error }) => { if (error) sToast("Sync error", "err"); });
-  }, [canDelTrip, sToast]);
-
-  const pinT = useCallback((id) => {
-    setTrips(p => p.map(t => t.id === id ? { ...t, pinned: true } : t)); sToast("Pinned");
-    supabase.from("trips").update({ pinned: true }).eq("id", id)
-      .then(({ error }) => { if (error) sToast("Sync error", "err"); });
-  }, [sToast]);
-
-  const unpinT = useCallback((id) => {
-    setTrips(p => p.map(t => t.id === id ? { ...t, pinned: false } : t)); sToast("Unpinned");
-    supabase.from("trips").update({ pinned: false }).eq("id", id)
-      .then(({ error }) => { if (error) sToast("Sync error", "err"); });
-  }, [sToast]);
-
-  // ── Filtered list ─────────────────────────────────────────────────────────
-  const filtered = useMemo(() => {
-    let l = [...exps];
-    if (selTrip) l = l.filter(e => e.tripId === selTrip);
-    else if (fCat !== "all") {
-      if (fCat.startsWith("trip_")) l = l.filter(e => e.tripId === fCat.replace("trip_", ""));
-      else l = l.filter(e => e.category === fCat && !e.tripId);
-    }
-    if (fPay !== "all") l = l.filter(e => e.payMode === fPay);
-    if (sq.trim()) {
-      const q = sq.toLowerCase();
-      l = l.filter(e => {
-        const catLabel = (allCats.find(c => c.id === (e.tripId ? `trip_${e.tripId}` : e.category))?.label || "").toLowerCase();
-        const payLabel = (PAY.find(p => p.id === e.payMode)?.label || e.payMode).toLowerCase();
-        return (e.note || "").toLowerCase().includes(q) || e.amount.toString().includes(q) || catLabel.includes(q) || payLabel.includes(q);
-      });
-    }
-    return l;
-  }, [exps, fCat, fPay, sq, selTrip, allCats]);
 
   // ── Insights ──────────────────────────────────────────────────────────────
   const insPeriodLabel = useMemo(() => {
