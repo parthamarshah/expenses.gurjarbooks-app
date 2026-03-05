@@ -3,7 +3,7 @@ import { supabase, dbToExp, dbToTrip, expToDb, tripToDb } from "./supabase";
 import { useAuth } from "./AuthContext";
 import Auth, { PasswordReset } from "./Auth";
 
-const CATEGORIES = [
+const DEFAULT_CATEGORIES = [
   { id: "personal",   label: "Personal", icon: "👤" },
   { id: "work",       label: "Work",     icon: "💼" },
   { id: "home",       label: "Home",     icon: "🏠" },
@@ -82,6 +82,10 @@ export default function ExpenseTracker() {
   const [keyMod,     setKeyMod]     = useState(false);
   const [userKey,    setUserKey]    = useState(null);
   const [keyLoading, setKeyLoading] = useState(false);
+  const [cats,       setCats]       = useState(DEFAULT_CATEGORIES);
+  const [catMod,     setCatMod]     = useState(false);
+  const [editCats,   setEditCats]   = useState(DEFAULT_CATEGORIES);
+  const [catSaving,  setCatSaving]  = useState(false);
   const aRef = useRef(null);
   const tRef = useRef({});
   const mRef = useRef({}); // modal swipe-down tracking
@@ -93,12 +97,24 @@ export default function ExpenseTracker() {
     let expsChannel, tripsChannel;
 
     const init = async () => {
-      const [{ data: expRows }, { data: tripRows }] = await Promise.all([
+      const [{ data: expRows }, { data: tripRows }, { data: prefsRow }] = await Promise.all([
         supabase.from("expenses").select("*").eq("user_id", userId).order("date", { ascending: false }),
         supabase.from("trips").select("*").eq("user_id", userId).order("created_at", { ascending: false }),
+        supabase.from("user_prefs").select("cats_json").eq("user_id", userId).maybeSingle(),
       ]);
       setExps((expRows  || []).map(dbToExp));
       setTrips((tripRows || []).map(dbToTrip));
+      if (prefsRow?.cats_json) {
+        try {
+          const saved = JSON.parse(prefsRow.cats_json);
+          // merge: keep IDs + order from defaults, apply saved label/icon
+          const merged = DEFAULT_CATEGORIES.map(def => {
+            const s = saved.find(x => x.id === def.id);
+            return s ? { ...def, label: s.label || def.label, icon: s.icon || def.icon } : def;
+          });
+          setCats(merged);
+        } catch {}
+      }
       setDbReady(true);
 
       expsChannel = supabase.channel(`exp:${userId}`)
@@ -142,14 +158,14 @@ export default function ExpenseTracker() {
   [trips, getTAct]);
 
   const addCats = useMemo(() => [
-    ...CATEGORIES,
+    ...cats,
     ...activeTrips.map(t => ({ id: `trip_${t.id}`, label: t.name, icon: "\u2708\uFE0F", isTrip: true })),
-  ], [activeTrips]);
+  ], [cats, activeTrips]);
 
   const allCats = useMemo(() => [
-    ...CATEGORIES,
+    ...cats,
     ...[...activeTrips, ...inactiveTrips].map(t => ({ id: `trip_${t.id}`, label: t.name, icon: "\u2708\uFE0F", isTrip: true })),
-  ], [activeTrips, inactiveTrips]);
+  ], [cats, activeTrips, inactiveTrips]);
 
   const quickAmts = useMemo(() => {
     const cutoff = Date.now() - 365 * 864e5;
@@ -175,6 +191,22 @@ export default function ExpenseTracker() {
     matched.forEach(e => { const n = e.note.trim(); freq[n] = (freq[n] || 0) + 1; });
     return Object.entries(freq).filter(([, c]) => c >= 3).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n]) => n); // ≥3 occurrences
   }, [exps, amt, cat, pay]);
+
+  // Typing-based autocomplete: activates after 20 entries, matches note starts-with typed text
+  const NOTE_AUTOFILL_MIN = 20;
+  const noteAutocomplete = useMemo(() => {
+    if (exps.length < NOTE_AUTOFILL_MIN) return [];
+    if (!note || note.length < 2) return [];
+    const q = note.toLowerCase();
+    const freq = {};
+    exps.forEach(e => {
+      const n = (e.note || "").trim();
+      if (n && n.toLowerCase().startsWith(q) && n.toLowerCase() !== q) {
+        freq[n] = (freq[n] || 0) + 1;
+      }
+    });
+    return Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n]) => n);
+  }, [exps, note]);
 
   const sToast = useCallback((m, t = "ok") => { setToast({ m, t }); setTimeout(() => setToast(null), 1500); }, []);
 
@@ -205,6 +237,25 @@ export default function ExpenseTracker() {
     if (!userKey) return;
     navigator.clipboard?.writeText(userKey).then(() => sToast("Copied!")).catch(() => sToast("Copy failed", "err"));
   }, [userKey, sToast]);
+
+  // ── Custom categories ─────────────────────────────────────────────────────
+  const openCatMod = useCallback(() => {
+    setEditCats(cats.map(c => ({ ...c })));
+    setCatMod(true);
+  }, [cats]);
+
+  const saveCustomCats = useCallback(async () => {
+    setCatSaving(true);
+    const cleaned = editCats.map(c => ({
+      id: c.id,
+      label: c.label.trim() || DEFAULT_CATEGORIES.find(d => d.id === c.id).label,
+      icon:  c.icon.trim()  || DEFAULT_CATEGORIES.find(d => d.id === c.id).icon,
+    }));
+    setCats(cleaned);
+    setCatMod(false);
+    setCatSaving(false);
+    await supabase.from("user_prefs").upsert({ user_id: userId, cats_json: JSON.stringify(cleaned) });
+  }, [editCats, userId]);
 
   // ── CRUD — all optimistic ─────────────────────────────────────────────────
   const doSave = useCallback(async () => {
@@ -398,8 +449,8 @@ export default function ExpenseTracker() {
     else { setSw({ id: null, dir: null }); setSwipeConf(null); }
   }, [exps, doEdit]);
 
-  const getCL = (e) => { if (e.tripId) { const t = trips.find(x => x.id === e.tripId); return t ? t.name : "Trip"; } return CATEGORIES.find(c => c.id === e.category)?.label || e.category; };
-  const getCI = (e) => { if (e.tripId) return "\u2708\uFE0F"; return CATEGORIES.find(c => c.id === e.category)?.icon || "?"; };
+  const getCL = (e) => { if (e.tripId) { const t = trips.find(x => x.id === e.tripId); return t ? t.name : "Trip"; } return cats.find(c => c.id === e.category)?.label || e.category; };
+  const getCI = (e) => { if (e.tripId) return "\u2708\uFE0F"; return cats.find(c => c.id === e.category)?.icon || "?"; };
 
   const navTo = (t) => { hap(); if (t === "list") { setSelTrip(null); setFCat("all"); setFPay("all"); setSq(""); } setSw({ id: null, dir: null }); setSwipeConf(null); setView(t); };
   const viewTH = (tid) => { setSelTrip(tid); setFCat("all"); setFPay("all"); setSq(""); setView("list"); };
@@ -466,7 +517,10 @@ export default function ExpenseTracker() {
             </div>
 
             <div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: G.t3, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 6 }}>Category</div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: G.t3, textTransform: "uppercase", letterSpacing: 1.5 }}>Category</div>
+                <button onClick={openCatMod} title="Customise categories" style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: G.tm, padding: "2px 4px", lineHeight: 1, fontWeight: 600 }}>✎ edit</button>
+              </div>
               <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
                 {addCats.map(c => B(cat === c.id, c.label, () => { hap(); setCat(c.id); }))}
               </div>
@@ -481,8 +535,19 @@ export default function ExpenseTracker() {
               </div>
             </div>
 
-            <div>
-              <input type="text" placeholder="Note (optional)" value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === "Enter") doSave(); }} style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `2px solid ${G.bdr}`, fontSize: 16, outline: "none", boxSizing: "border-box", color: G.t1, background: G.bg2 }} autoComplete="off" />
+            <div style={{ position: "relative" }}>
+              <input type="text" placeholder="Note (optional)" value={note} onChange={e => setNote(e.target.value)} onKeyDown={e => { if (e.key === "Enter") doSave(); if (e.key === "Tab" && noteAutocomplete.length > 0) { e.preventDefault(); hap(); setNote(noteAutocomplete[0]); } }} style={{ width: "100%", padding: "12px 14px", borderRadius: 12, border: `2px solid ${G.bdr}`, fontSize: 16, outline: "none", boxSizing: "border-box", color: G.t1, background: G.bg2 }} autoComplete="off" />
+              {/* Autocomplete dropdown: shows while typing (after 20 entries) */}
+              {noteAutocomplete.length > 0 && (
+                <div style={{ position: "absolute", left: 0, right: 0, top: "100%", marginTop: 3, background: G.bg, border: `1.5px solid ${G.bdr}`, borderRadius: 12, zIndex: 50, overflow: "hidden", boxShadow: "0 4px 16px rgba(0,0,0,.10)" }}>
+                  {noteAutocomplete.map((s, i) => (
+                    <button key={s} onMouseDown={e => { e.preventDefault(); hap(); setNote(s); }} style={{ display: "block", width: "100%", padding: "11px 14px", border: "none", borderTop: i > 0 ? `1px solid ${G.lt}` : "none", background: "transparent", textAlign: "left", fontSize: 15, color: G.t1, cursor: "pointer", fontWeight: i === 0 ? 600 : 400 }}>
+                      <span style={{ color: G.t3 }}>{note}</span>{s.slice(note.length)}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Context suggestions: shows when note is empty & amount is filled */}
               {noteSuggestions.length > 0 && !note && (
                 <div style={{ display: "flex", gap: 6, overflowX: "auto", marginTop: 6, paddingBottom: 2, WebkitOverflowScrolling: "touch" }}>
                   {noteSuggestions.map(s => (
@@ -674,7 +739,7 @@ export default function ExpenseTracker() {
             <div style={{ marginBottom: 22 }}>
               <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>By Category <span style={{ fontSize: 12, color: G.tm, fontWeight: 400 }}>· tap to filter history</span></div>
               {Object.entries(ins.bc).sort((a, b) => b[1] - a[1]).map(([cid, a]) => {
-                const c = allCats.find(x => x.id === cid) || CATEGORIES[0];
+                const c = allCats.find(x => x.id === cid) || cats[0];
                 const p = ins.totM > 0 ? (a / ins.totM * 100) : 0;
                 return (
                   <div key={cid} onClick={() => { hap(); setSelTrip(null); setFPay("all"); setSq(""); setFCat(cid); setSw({ id: null, dir: null }); setSwipeConf(null); setView("list"); }} style={{ marginBottom: 14, cursor: "pointer" }}>
@@ -894,6 +959,40 @@ export default function ExpenseTracker() {
               <div>3. Edit your bank SMS shortcut</div>
               <div>4. Set the <b>key</b> field to your copied key</div>
               <div>5. Done — bank SMS will auto-log expenses</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════ CATEGORY EDIT MODAL ══════ */}
+      {catMod && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 999 }} onClick={() => setCatMod(false)}>
+          <div style={{ width: "100%", maxWidth: 390, background: G.bg, borderRadius: "20px 20px 0 0", padding: "24px 20px 40px" }} onClick={e => e.stopPropagation()}>
+            <div style={{ width: 36, height: 4, borderRadius: 2, background: G.lt, margin: "0 auto 18px" }} />
+            <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 4 }}>Customise Categories</div>
+            <div style={{ fontSize: 13, color: G.t3, marginBottom: 20 }}>Change labels and icons. Your existing entries are unaffected.</div>
+            {editCats.map((c, i) => (
+              <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                <input
+                  type="text"
+                  value={c.icon}
+                  onChange={e => setEditCats(p => p.map((x, j) => j === i ? { ...x, icon: e.target.value } : x))}
+                  maxLength={2}
+                  style={{ width: 46, padding: "10px 0", borderRadius: 10, border: `2px solid ${G.bdr}`, fontSize: 22, outline: "none", textAlign: "center", background: G.bg2, color: G.t1, boxSizing: "border-box" }}
+                />
+                <input
+                  type="text"
+                  value={c.label}
+                  onChange={e => setEditCats(p => p.map((x, j) => j === i ? { ...x, label: e.target.value } : x))}
+                  maxLength={14}
+                  placeholder={DEFAULT_CATEGORIES[i].label}
+                  style={{ flex: 1, padding: "10px 14px", borderRadius: 10, border: `2px solid ${G.bdr}`, fontSize: 16, outline: "none", background: G.bg2, color: G.t1, boxSizing: "border-box" }}
+                />
+              </div>
+            ))}
+            <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+              <button onClick={() => setEditCats(DEFAULT_CATEGORIES.map(c => ({ ...c })))} style={{ padding: "12px 18px", borderRadius: 12, border: `2px solid ${G.bdr}`, background: G.bg, color: G.t3, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Reset</button>
+              <button onClick={saveCustomCats} disabled={catSaving} style={{ flex: 1, padding: "12px", borderRadius: 12, border: "none", background: G.bk, color: G.wh, fontSize: 16, fontWeight: 700, cursor: "pointer" }}>{catSaving ? "Saving…" : "Save"}</button>
             </div>
           </div>
         </div>
