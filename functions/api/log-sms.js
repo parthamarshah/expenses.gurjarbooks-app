@@ -56,7 +56,7 @@ export async function onRequestPost(context) {
   // Step 3: Auto-detect payment mode type (card/bank/cash)
   const payType = detectPayMode(sms, bank);
 
-  // Step 3b: Match to user's configured banks
+  // Step 3b: Match to user's configured banks (or auto-create one)
   if (!payMode || payMode === "bank" || payMode === "card") {
     // Load user's bank config to match
     const { data: prefsRow } = await supabase
@@ -70,26 +70,34 @@ export async function onRequestPost(context) {
       try { userBanks = JSON.parse(prefsRow.banks_json); } catch {}
     }
 
-    if (userBanks.length > 0) {
-      // Try matching by last4 digits from SMS
-      const last4Match = sms.match(/(?:XX?|xx?|ending|x{1,2})(\d{4})/);
-      const smsLast4 = last4Match ? last4Match[1] : null;
+    // Extract last4 from SMS for matching
+    const last4Match = sms.match(/(?:XX?|xx?|ending|x{1,2})(\d{4})/);
+    const smsLast4 = last4Match ? last4Match[1] : null;
 
-      let matched = null;
+    const bankNames = {
+      hdfc: "HDFC", icici: "ICICI", sbi: "SBI", axis: "Axis",
+      kotak: "Kotak", indusind: "IndusInd", idfc: "IDFC", yes: "Yes Bank",
+      pnb: "PNB", bob: "BOB", federal: "Federal", canara: "Canara",
+      union: "Union", boi: "BOI",
+    };
+    const bankPatterns = {
+      hdfc: /hdfc/i, icici: /icici/i, sbi: /sbi|state\s*bank/i, axis: /axis/i,
+      kotak: /kotak/i, indusind: /indus/i, idfc: /idfc/i, yes: /yes\s*bank/i,
+      pnb: /pnb|punjab/i, bob: /baroda|bob/i, federal: /federal/i,
+      canara: /canara/i, union: /union/i, boi: /bank\s*of\s*india/i,
+    };
+
+    let matched = null;
+
+    if (userBanks.length > 0) {
+      // Try matching by last4 digits first
       if (smsLast4) {
         matched = userBanks.find(b => b.last4 === smsLast4);
       }
-      // If no last4 match, try matching by bank name in label
+      // Fallback: match by bank name in label
       if (!matched && bank !== "unknown") {
-        const bankNames = {
-          hdfc: /hdfc/i, icici: /icici/i, sbi: /sbi|state\s*bank/i, axis: /axis/i,
-          kotak: /kotak/i, indusind: /indus/i, idfc: /idfc/i, yes: /yes\s*bank/i,
-          pnb: /pnb|punjab/i, bob: /baroda|bob/i, federal: /federal/i,
-          canara: /canara/i, union: /union/i, boi: /bank\s*of\s*india/i,
-        };
-        const bankPat = bankNames[bank];
+        const bankPat = bankPatterns[bank];
         if (bankPat) {
-          // Also factor in payType: if SMS is a card transaction, prefer credit_card type bank
           const candidates = userBanks.filter(b => bankPat.test(b.label));
           if (payType === "card") {
             matched = candidates.find(b => b.type === "credit_card") || candidates[0];
@@ -98,7 +106,19 @@ export async function onRequestPost(context) {
           }
         }
       }
-      payMode = matched ? matched.id : (payType === "cash" ? "cash" : "bank");
+    }
+
+    if (matched) {
+      payMode = matched.id;
+    } else if (bank !== "unknown" && payType !== "cash") {
+      // Auto-create a bank entry from SMS info
+      const newBankId = "bnk_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 4);
+      const label = bankNames[bank] || bank.charAt(0).toUpperCase() + bank.slice(1);
+      const newBank = { id: newBankId, label, type: payType === "card" ? "credit_card" : "bank", last4: smsLast4 || "" };
+      const updatedBanks = [...userBanks, newBank];
+      // Save to user_prefs (fire-and-forget, don't block the response)
+      supabase.from("user_prefs").upsert({ user_id: userId, banks_json: JSON.stringify(updatedBanks) }).then(() => {});
+      payMode = newBankId;
     } else {
       payMode = payType;
     }
