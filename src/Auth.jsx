@@ -146,7 +146,8 @@ function AuthInner() {
         } else {
           setSignedUpEmail(email.trim());
           setInfo("__confirm__");
-          setTimeout(() => { setMode("login"); setPassword(""); }, 4000);
+          setMode("login");
+          setPassword("");
         }
       }
     } finally { setBusy(false); }
@@ -174,10 +175,20 @@ function AuthInner() {
                              padding: "12px 16px", fontSize: 14, color: "#CC0000", marginBottom: 14 }}>
         {err === "__exists__" ? (<>Account already exists — <button onClick={() => reset("login")} style={{ background: "none", border: "none", padding: 0, fontSize: 14, fontWeight: 700, color: "#CC0000", cursor: "pointer", textDecoration: "underline" }}>try signing in</button></>) : err}
       </div>}
-      {info && <div style={{ background: "#F0F7FF", border: "1.5px solid #CCE0FF", borderRadius: 10,
-                             padding: "12px 16px", fontSize: 14, color: "#0055CC", marginBottom: 14 }}>
-        {info === "__confirm__" ? (<>Check your email to confirm your account, then sign in.{" "}<button onClick={handleResend} disabled={resending} style={{ background: "none", border: "none", padding: 0, fontSize: 14, fontWeight: 700, color: "#0055CC", cursor: "pointer", textDecoration: "underline" }}>{resending ? "Sending…" : "Resend email"}</button></>) : info}
-      </div>}
+      {info && (info === "__confirm__" ? (
+        <div style={{ background: "#F0F7FF", border: "2px solid #CCE0FF", borderRadius: 14,
+                      padding: "18px 18px", marginBottom: 16, textAlign: "center" }}>
+          <div style={{ fontSize: 32, marginBottom: 8 }}>✓</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: "#0055CC", marginBottom: 6 }}>Confirmation Email Sent!</div>
+          <div style={{ fontSize: 14, color: "#0055CC", lineHeight: 1.5, marginBottom: 10 }}>
+            Check your inbox (and spam folder) for <strong>{signedUpEmail}</strong>. Click the link to verify, then sign in below.
+          </div>
+          <button onClick={handleResend} disabled={resending} style={{ background: "none", border: "none", padding: 0, fontSize: 14, fontWeight: 700, color: "#0055CC", cursor: "pointer", textDecoration: "underline" }}>{resending ? "Sending…" : "Resend email"}</button>
+        </div>
+      ) : (
+        <div style={{ background: "#F0F7FF", border: "1.5px solid #CCE0FF", borderRadius: 10,
+                      padding: "12px 16px", fontSize: 14, color: "#0055CC", marginBottom: 14 }}>{info}</div>
+      ))}
 
       {/* Email */}
       <input type="email" placeholder="Email" value={email} autoComplete="email"

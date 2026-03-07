@@ -102,6 +102,7 @@ export default function ExpenseTracker() {
   const [profileSaving, setProfileSaving] = useState(false);
   const [delConfirm, setDelConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [onboardStep, setOnboardStep] = useState(null); // null = hidden, 0-2 = step index
   // Persisted feedback: counts how many times the user has chosen each note from a suggestion/autocomplete.
   // Stored in localStorage so it accumulates across sessions without needing a DB migration.
   const [noteFeedback, setNoteFeedback] = useState(() => {
@@ -184,6 +185,23 @@ export default function ExpenseTracker() {
 
     init();
     return () => { expsChannel?.unsubscribe(); tripsChannel?.unsubscribe(); };
+  }, [userId]);
+
+  // ── Onboarding guide for new users ─────────────────────────────────────
+  // Fires when data finishes loading for any user. For a brand-new user (0 expenses,
+  // no localStorage flag), shows the welcome guide.
+  const onboardChecked = useRef(null); // tracks which userId we already checked
+  useEffect(() => {
+    if (!dbReady || !userId) return;
+    if (onboardChecked.current === userId) return;
+    onboardChecked.current = userId;
+    try { if (localStorage.getItem(`onboarded_${userId}`)) return; } catch {}
+    if (exps.length === 0) setOnboardStep(0);
+  }, [dbReady, userId, exps.length]);
+
+  const dismissOnboard = useCallback(() => {
+    setOnboardStep(null);
+    try { localStorage.setItem(`onboarded_${userId}`, "1"); } catch {}
   }, [userId]);
 
   // ── Computed ──────────────────────────────────────────────────────────────
@@ -1557,6 +1575,61 @@ td.t2 { color: #666; white-space: nowrap; }
                     }} disabled={deleting} style={{ flex: 1, padding: "13px", borderRadius: 12, border: "none", background: "#CC0000", color: G.wh, fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{deleting ? "Deleting…" : "Yes, Delete Everything"}</button>
                   </div>
                 </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════ ONBOARDING GUIDE ══════ */}
+      {onboardStep !== null && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 10000, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={dismissOnboard}>
+          <div onClick={e => e.stopPropagation()} style={{ width: "100%", maxWidth: 390, background: G.bg, borderRadius: "20px 20px 0 0", padding: "24px 22px env(safe-area-inset-bottom, 20px)", maxHeight: "80dvh", overflowY: "auto" }}>
+            {/* Progress dots */}
+            <div style={{ display: "flex", justifyContent: "center", gap: 8, marginBottom: 18 }}>
+              {[0, 1, 2].map(i => <div key={i} style={{ width: i === onboardStep ? 24 : 8, height: 8, borderRadius: 4, background: i === onboardStep ? G.bk : G.bg3, transition: "all .2s" }} />)}
+            </div>
+
+            {onboardStep === 0 && <>
+              <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 6 }}>Welcome to GurjarBooks!</div>
+              <div style={{ fontSize: 14, color: G.t2, lineHeight: 1.6, marginBottom: 20 }}>Let's get you set up in under a minute. You can always change these later.</div>
+              <div style={{ background: G.bg2, borderRadius: 14, padding: "16px 18px", marginBottom: 16 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>1. Customise Categories</div>
+                <div style={{ fontSize: 13, color: G.t2, lineHeight: 1.5, marginBottom: 12 }}>You start with Personal, Work, Home & Savings. Add your own categories or hide ones you don't need.</div>
+                <button onClick={() => { setCatMod(true); setEditCats(cats.map(c => ({ ...c }))); }} style={{ width: "100%", padding: "11px", borderRadius: 10, border: `2px solid ${G.bk}`, background: G.bk, color: G.wh, fontSize: 14, fontWeight: 700, cursor: "pointer" }}>Edit Categories</button>
+              </div>
+            </>}
+
+            {onboardStep === 1 && <>
+              <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 6 }}>Add Your Banks</div>
+              <div style={{ fontSize: 14, color: G.t2, lineHeight: 1.6, marginBottom: 20 }}>Add your bank accounts and cards so expenses are tagged to the right source. If you skip this, banks will be auto-created from SMS data later.</div>
+              <div style={{ background: G.bg2, borderRadius: 14, padding: "16px 18px", marginBottom: 16 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>2. Banks & Cards</div>
+                <div style={{ fontSize: 13, color: G.t2, lineHeight: 1.5, marginBottom: 12 }}>Add your bank accounts (HDFC, SBI, etc.) and credit cards. Include the last 4 digits for automatic SMS matching.</div>
+                <button onClick={() => { setBankMod(true); setEditBanks(banks.length > 0 ? banks.map(b => ({ ...b })) : [{ id: "bnk_" + Date.now().toString(36), label: "", type: "bank", last4: "" }]); }} style={{ width: "100%", padding: "11px", borderRadius: 10, border: `2px solid ${G.bk}`, background: G.bk, color: G.wh, fontSize: 14, fontWeight: 700, cursor: "pointer" }}>Add Banks</button>
+              </div>
+            </>}
+
+            {onboardStep === 2 && <>
+              <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 6 }}>Auto-Track via SMS</div>
+              <div style={{ fontSize: 14, color: G.t2, lineHeight: 1.6, marginBottom: 20 }}>Set up an iPhone Shortcut to automatically log expenses from bank SMS messages. This is optional — you can always add expenses manually.</div>
+              <div style={{ background: G.bg2, borderRadius: 14, padding: "16px 18px", marginBottom: 16 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>3. iPhone Shortcut</div>
+                <div style={{ fontSize: 13, color: G.t2, lineHeight: 1.5, marginBottom: 12 }}>Get your API key from the key icon (top right), then download the shortcut and set up a message automation for your bank.</div>
+                <button onClick={() => { dismissOnboard(); setKeyMod(true); }} style={{ width: "100%", padding: "11px", borderRadius: 10, border: `2px solid ${G.bk}`, background: G.bk, color: G.wh, fontSize: 14, fontWeight: 700, cursor: "pointer" }}>Set Up Key & Shortcut</button>
+              </div>
+            </>}
+
+            {/* Navigation */}
+            <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+              {onboardStep > 0 && (
+                <button onClick={() => setOnboardStep(s => s - 1)} style={{ flex: 1, padding: "12px", borderRadius: 12, border: `2px solid ${G.bdr}`, background: G.bg, color: G.t2, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Back</button>
+              )}
+              <button onClick={dismissOnboard} style={{ flex: 1, padding: "12px", borderRadius: 12, border: `2px solid ${G.bdr}`, background: G.bg, color: G.t3, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Skip</button>
+              {onboardStep < 2 ? (
+                <button onClick={() => setOnboardStep(s => s + 1)} style={{ flex: 1, padding: "12px", borderRadius: 12, border: "none", background: G.bk, color: G.wh, fontSize: 14, fontWeight: 700, cursor: "pointer" }}>Next</button>
+              ) : (
+                <button onClick={dismissOnboard} style={{ flex: 1, padding: "12px", borderRadius: 12, border: "none", background: G.bk, color: G.wh, fontSize: 14, fontWeight: 700, cursor: "pointer" }}>Done</button>
               )}
             </div>
           </div>
