@@ -39,7 +39,7 @@ export async function onRequestPost(context) {
   const userId   = keyRow.user_id;
   const sms      = (body.sms      || "").trim();
   const category = (body.category || "personal").trim().toLowerCase();
-  let   payMode  = (body.pay_mode || "bank").trim();
+  let   payMode  = (body.pay_mode || "").trim();
 
   if (!sms) {
     return new Response(JSON.stringify({ ok: false, error: "sms field required" }), { status: 400, headers: cors });
@@ -53,9 +53,55 @@ export async function onRequestPost(context) {
     return new Response(JSON.stringify({ ok: false, error: "Not a debit SMS — skipped", skipped: true }), { status: 422, headers: cors });
   }
 
-  // Step 3: Auto-detect payment mode
-  if (payMode === "bank") {
-    payMode = detectPayMode(sms, bank);
+  // Step 3: Auto-detect payment mode type (card/bank/cash)
+  const payType = detectPayMode(sms, bank);
+
+  // Step 3b: Match to user's configured banks
+  if (!payMode || payMode === "bank" || payMode === "card") {
+    // Load user's bank config to match
+    const { data: prefsRow } = await supabase
+      .from("user_prefs")
+      .select("banks_json")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    let userBanks = [];
+    if (prefsRow?.banks_json) {
+      try { userBanks = JSON.parse(prefsRow.banks_json); } catch {}
+    }
+
+    if (userBanks.length > 0) {
+      // Try matching by last4 digits from SMS
+      const last4Match = sms.match(/(?:XX?|xx?|ending|x{1,2})(\d{4})/);
+      const smsLast4 = last4Match ? last4Match[1] : null;
+
+      let matched = null;
+      if (smsLast4) {
+        matched = userBanks.find(b => b.last4 === smsLast4);
+      }
+      // If no last4 match, try matching by bank name in label
+      if (!matched && bank !== "unknown") {
+        const bankNames = {
+          hdfc: /hdfc/i, icici: /icici/i, sbi: /sbi|state\s*bank/i, axis: /axis/i,
+          kotak: /kotak/i, indusind: /indus/i, idfc: /idfc/i, yes: /yes\s*bank/i,
+          pnb: /pnb|punjab/i, bob: /baroda|bob/i, federal: /federal/i,
+          canara: /canara/i, union: /union/i, boi: /bank\s*of\s*india/i,
+        };
+        const bankPat = bankNames[bank];
+        if (bankPat) {
+          // Also factor in payType: if SMS is a card transaction, prefer credit_card type bank
+          const candidates = userBanks.filter(b => bankPat.test(b.label));
+          if (payType === "card") {
+            matched = candidates.find(b => b.type === "credit_card") || candidates[0];
+          } else {
+            matched = candidates.find(b => b.type === "bank") || candidates[0];
+          }
+        }
+      }
+      payMode = matched ? matched.id : (payType === "cash" ? "cash" : "bank");
+    } else {
+      payMode = payType;
+    }
   }
 
   // Step 4: Strip balance info to avoid confusing amount parser
@@ -245,6 +291,8 @@ function parseSmsAmount(sms, bank) {
       /Spent\s+(?:Rs\.?|INR)\s*([\d,]+(?:\.\d{1,2})?)/i,
     ],
     kotak: [
+      // "Sent Rs.70.00 from Kotak Bank AC X3082"
+      /Sent\s+Rs\.?\s*([\d,]+(?:\.\d{1,2})?)\s+from/i,
       /Rs\.?\s*([\d,]+(?:\.\d{1,2})?)\s+(?:was\s+)?debited/i,
       /Spent\s+Rs\.?\s*([\d,]+(?:\.\d{1,2})?)/i,
     ],
@@ -352,6 +400,21 @@ function parseSmsNote(sms, bank) {
   if (bank === "icici" && !extracted) {
     const m = sms.match(/\bat\s+([A-Za-z][A-Za-z0-9 &\-\.\/]{2,35}?)(?=\s+on|\s+ref|[,.]|$)/i);
     if (m) extracted = m[1].trim();
+  }
+
+  if (bank === "kotak" && !extracted) {
+    // "Sent Rs.70.00 from Kotak Bank AC X3082 to bharatpe.8a0p0v7t7h42223@fbpe on 07-03-26.UPI Ref..."
+    // Extract UPI ID or payee after "to"
+    const m = sms.match(/\bto\s+([A-Za-z0-9._\-]+@[A-Za-z0-9]+)\s+on\b/i);
+    if (m) {
+      // Try to extract readable name from UPI ID (before the @)
+      const upiName = m[1].split("@")[0].replace(/[0-9._\-]+$/g, "").replace(/\./g, " ").trim();
+      extracted = upiName.length >= 2 ? upiName : m[1];
+    }
+    if (!extracted) {
+      const m2 = sms.match(/\bto\s+([A-Za-z][A-Za-z0-9 &\-\.]{2,40}?)\s+on\b/i);
+      if (m2) extracted = m2[1].trim();
+    }
   }
 
   if (bank === "sbi" && !extracted) {

@@ -9,10 +9,8 @@ const DEFAULT_CATEGORIES = [
   { id: "home",       label: "Home",     icon: "🏠" },
   { id: "investment", label: "Savings",  icon: "₹" },
 ];
-const PAY = [{ id: "cash", label: "Cash" }, { id: "bank", label: "Bank" }, { id: "card", label: "Card" }];
-
 // iCloud Shortcut link — update this after sharing/re-sharing the shortcut
-const SHORTCUT_ICLOUD_URL = "";
+const SHORTCUT_ICLOUD_URL = "https://www.icloud.com/shortcuts/31e442fe1b6044da9f9b9545ccf9f62e";
 
 const formatINR = (n) => {
   if (n == null || n === "") return "\u20B90";
@@ -57,11 +55,11 @@ export default function ExpenseTracker() {
   const [exps,      setExps]      = useState([]);
   const [trips,     setTrips]     = useState([]);
   const [dbReady,   setDbReady]   = useState(false);
-  const [view,      setView]      = useState("add");
+  const [view,      setView]      = useState("list");
   const [amt,       setAmt]       = useState("");
   const [note,      setNote]      = useState("");
   const [cat,       setCat]       = useState("personal");
-  const [pay,       setPay]       = useState("bank");
+  const [pay,       setPay]       = useState("cash");
   const [editId,    setEditId]    = useState(null);
   const [toast,     setToast]     = useState(null);
   const [sq,        setSq]        = useState("");
@@ -156,7 +154,11 @@ export default function ExpenseTracker() {
         } catch {}
       }
       if (prefsRow?.banks_json) {
-        try { setBanks(JSON.parse(prefsRow.banks_json)); } catch {}
+        try {
+          const parsed = JSON.parse(prefsRow.banks_json);
+          setBanks(parsed);
+          if (parsed.length > 0) setPay(parsed[0].id);
+        } catch {}
       }
       setDbReady(true);
 
@@ -212,6 +214,26 @@ export default function ExpenseTracker() {
 
   // Visible categories only — used for history filter dropdowns
   const visCats = useMemo(() => allCats.filter(c => !c.hidden), [allCats]);
+
+  // Dynamic payment modes: Cash + user's configured banks/cards
+  const payModes = useMemo(() => {
+    const modes = [{ id: "cash", label: "Cash" }];
+    if (banks.length > 0) {
+      banks.forEach(b => modes.push({ id: b.id, label: b.label + (b.type === "credit_card" ? " Card" : ""), bankType: b.type }));
+    } else {
+      modes.push({ id: "bank", label: "Bank" });
+    }
+    return modes;
+  }, [banks]);
+
+  // Get payment mode label for display (handles legacy "bank"/"card" values)
+  const getPayLabel = useCallback((payId) => {
+    if (payId === "cash") return "Cash";
+    if (payId === "bank") return "Bank";
+    if (payId === "card") return "Card";
+    const b = banks.find(x => x.id === payId);
+    return b ? b.label : "Bank";
+  }, [banks]);
 
   const quickAmts = useMemo(() => {
     const cutoff = Date.now() - 365 * 864e5;
@@ -453,7 +475,7 @@ export default function ExpenseTracker() {
       const q = sq.toLowerCase();
       l = l.filter(e => {
         const catLabel = (allCats.find(c => c.id === (e.tripId ? `trip_${e.tripId}` : e.category))?.label || "").toLowerCase();
-        const payLabel = (PAY.find(p => p.id === e.payMode)?.label || e.payMode).toLowerCase();
+        const payLabel = getPayLabel(e.payMode).toLowerCase();
         return (e.note || "").toLowerCase().includes(q) || e.amount.toString().includes(q) || catLabel.includes(q) || payLabel.includes(q);
       });
     }
@@ -485,7 +507,7 @@ export default function ExpenseTracker() {
         <td class="t2">${tts(e.date)}</td>
         <td>${esc(getCatLabel(e))}</td>
         <td>${e.note ? esc(e.note) : "<span class='em'>\u2014</span>"}</td>
-        <td class="t2">${e.payMode === "cash" ? "Cash" : "Bank"}</td>
+        <td class="t2">${esc(getPayLabel(e.payMode))}</td>
         <td class="amt">\u20B9${e.amount.toLocaleString("en-IN")}</td>
       </tr>`).join("");
     const html = `<!DOCTYPE html>
@@ -573,7 +595,7 @@ td.t2 { color: #666; white-space: nowrap; }
     ws.views = [{ state: "frozen", ySplit: 1 }];
     ws.autoFilter = { from: "A1", to: "F1" };
     [...filtered].reverse().forEach(e => {
-      ws.addRow({ date: tds(e.date), time: tts(e.date), category: getCatLabel(e), note: e.note || "", payMode: PAY.find(p => p.id === e.payMode)?.label || e.payMode, amount: e.amount });
+      ws.addRow({ date: tds(e.date), time: tts(e.date), category: getCatLabel(e), note: e.note || "", payMode: getPayLabel(e.payMode), amount: e.amount });
     });
     const buffer = await wb.xlsx.writeBuffer();
     const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
@@ -612,7 +634,7 @@ td.t2 { color: #666; white-space: nowrap; }
   const saveBanks = useCallback(async () => {
     setBankSaving(true);
     const cleaned = editBanks.filter(b => b.label.trim()).map(b => ({
-      id: b.id, label: b.label.trim(), type: b.type || "bank", sender: (b.sender || "").trim(), last4: (b.last4 || "").trim(),
+      id: b.id, label: b.label.trim(), type: b.type || "bank", last4: (b.last4 || "").trim(),
     }));
     setBanks(cleaned);
     setBankMod(false);
@@ -704,12 +726,12 @@ td.t2 { color: #666; white-space: nowrap; }
   const getTI = useCallback((tid) => {
     const te = exps.filter(e => e.tripId === tid).sort((a, b) => new Date(a.date) - new Date(b.date));
     const tot = te.reduce((s, e) => s + e.amount, 0);
-    const cash = te.filter(e => e.payMode === "cash").reduce((s, e) => s + e.amount, 0);
-    const bank = te.filter(e => e.payMode === "bank").reduce((s, e) => s + e.amount, 0);
+    const byPay = {};
+    te.forEach(e => { byPay[e.payMode] = (byPay[e.payMode] || 0) + e.amount; });
     let d = 0;
     if (te.length > 1) d = Math.max(1, Math.ceil((new Date(te[te.length - 1].date) - new Date(te[0].date)) / 864e5) + 1);
     else if (te.length === 1) d = 1;
-    return { tot, cash, bank, d, avg: d > 0 ? Math.round(tot / d) : 0, cnt: te.length };
+    return { tot, byPay, d, avg: d > 0 ? Math.round(tot / d) : 0, cnt: te.length };
   }, [exps]);
 
   // ── Swipe handlers ────────────────────────────────────────────────────────
@@ -805,11 +827,12 @@ td.t2 { color: #666; white-space: nowrap; }
             </div>
 
             <div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: G.t3, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 6 }}>Paid via</div>
-              <div style={{ display: "flex", background: G.bg2, borderRadius: 12, padding: 3 }}>
-                {PAY.map(p => (
-                  <button key={p.id} onClick={() => { hap(); setPay(p.id); }} style={{ flex: 1, padding: "11px 0", borderRadius: 10, border: "none", cursor: "pointer", fontSize: 16, fontWeight: 700, background: pay === p.id ? G.bk : "transparent", color: pay === p.id ? G.wh : G.t3 }}>{p.label}</button>
-                ))}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: G.t3, textTransform: "uppercase", letterSpacing: 1.5 }}>Paid via</div>
+                <button onClick={openBankMod} title="Manage banks" style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: G.tm, padding: "2px 4px", lineHeight: 1, fontWeight: 600 }}>✎ edit</button>
+              </div>
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                {payModes.map(p => B(pay === p.id, p.label, () => { hap(); setPay(p.id); }))}
               </div>
             </div>
 
@@ -899,7 +922,7 @@ td.t2 { color: #666; white-space: nowrap; }
                 </select>
                 <select value={fPay} onChange={e => setFPay(e.target.value)} style={{ flex: 1, padding: "11px 10px", borderRadius: 10, border: `2px solid ${G.bdr}`, fontSize: 15, color: G.t2, background: G.bg, outline: "none" }}>
                   <option value="all">All Modes</option>
-                  {PAY.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                  {payModes.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
                 </select>
               </div>
             )}
@@ -963,7 +986,7 @@ td.t2 { color: #666; white-space: nowrap; }
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ fontWeight: 800, fontSize: 17 }}>{formatINR(exp.amount)}</div>
                               <div style={{ fontSize: 14, color: G.t3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                {exp.note || getCL(exp)}<span style={{ marginLeft: 6, fontSize: 12, color: G.tm }}>{"\u00B7"} {exp.payMode === "cash" ? "Cash" : "Bank"}</span>
+                                {exp.note || getCL(exp)}<span style={{ marginLeft: 6, fontSize: 12, color: G.tm }}>{"\u00B7"} {getPayLabel(exp.payMode)}</span>
                               </div>
                             </div>
                             <div style={{ fontSize: 12, color: G.tm, flexShrink: 0 }}>{tts(exp.date)}</div>
@@ -1037,6 +1060,50 @@ td.t2 { color: #666; white-space: nowrap; }
               );
             })()}
 
+            {/* Pie Chart */}
+            {Object.keys(ins.bc).length > 0 && (() => {
+              const PIE_COLORS = ["#111", "#555", "#999", "#C4C4C4", "#E8B4B4", "#A8C8E8", "#C8E8A8", "#E8D8A8"];
+              const entries = Object.entries(ins.bc).sort((a, b) => b[1] - a[1]);
+              const total = ins.totM || 1;
+              let cumAngle = 0;
+              const slices = entries.map(([cid, amt], i) => {
+                const frac = amt / total;
+                const startAngle = cumAngle;
+                cumAngle += frac * 360;
+                const endAngle = cumAngle;
+                const startRad = (startAngle - 90) * Math.PI / 180;
+                const endRad = (endAngle - 90) * Math.PI / 180;
+                const largeArc = frac > 0.5 ? 1 : 0;
+                const x1 = 50 + 45 * Math.cos(startRad), y1 = 50 + 45 * Math.sin(startRad);
+                const x2 = 50 + 45 * Math.cos(endRad), y2 = 50 + 45 * Math.sin(endRad);
+                const d = frac >= 0.999
+                  ? `M 50 5 A 45 45 0 1 1 49.99 5 Z`
+                  : `M 50 50 L ${x1} ${y1} A 45 45 0 ${largeArc} 1 ${x2} ${y2} Z`;
+                return { cid, d, color: PIE_COLORS[i % PIE_COLORS.length], label: (allCats.find(x => x.id === cid) || cats[0]).label, pct: Math.round(frac * 100) };
+              });
+              return (
+                <div style={{ marginBottom: 22, background: G.bg2, borderRadius: 14, padding: "16px 14px", border: `1px solid ${G.bdr}` }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 14 }}>Spending Breakdown</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+                    <svg viewBox="0 0 100 100" style={{ width: 130, height: 130, flexShrink: 0 }}>
+                      {slices.map((s, i) => <path key={i} d={s.d} fill={s.color} />)}
+                      <circle cx="50" cy="50" r="22" fill={G.bg2} />
+                    </svg>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      {slices.slice(0, 6).map((s, i) => (
+                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
+                          <div style={{ width: 10, height: 10, borderRadius: 3, background: s.color, flexShrink: 0 }} />
+                          <span style={{ fontSize: 12, color: G.t2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{s.label}</span>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: G.t1, flexShrink: 0 }}>{s.pct}%</span>
+                        </div>
+                      ))}
+                      {slices.length > 6 && <div style={{ fontSize: 11, color: G.tm }}>+{slices.length - 6} more</div>}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
             <div style={{ marginBottom: 22 }}>
               <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>By Category <span style={{ fontSize: 12, color: G.tm, fontWeight: 400 }}>· tap to filter history</span></div>
               {Object.entries(ins.bc).sort((a, b) => b[1] - a[1]).map(([cid, a]) => {
@@ -1058,7 +1125,7 @@ td.t2 { color: #666; white-space: nowrap; }
               {Object.entries(ins.bp).sort((a, b) => b[1] - a[1]).map(([pid, a]) => {
                 const p = ins.totM > 0 ? (a / ins.totM * 100) : 0;
                 return (<div key={pid} onClick={() => { hap(); setSelTrip(null); setFCat("all"); setSq(""); setFPay(pid); setHistPeriod(insPeriod); setHistMonth(insMonth); setHistYear(insYear); setSw({ id: null, dir: null }); setSwipeConf(null); setView("list"); }} style={{ marginBottom: 14, cursor: "pointer" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: G.t2, marginBottom: 5 }}><span>{PAY.find(x => x.id === pid)?.label || pid}</span><span style={{ fontWeight: 700, color: G.t1 }}>{formatINR(a)}</span></div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: G.t2, marginBottom: 5 }}><span>{getPayLabel(pid)}</span><span style={{ fontWeight: 700, color: G.t1 }}>{formatINR(a)}</span></div>
                   <div style={{ height: 7, background: G.bg3, borderRadius: 8, overflow: "hidden" }}><div style={{ height: 7, borderRadius: 8, background: G.ac, width: `${p}%`, transition: "width .4s" }} /></div>
                   <div style={{ fontSize: 12, color: G.tm, marginTop: 3, textAlign: "right" }}>{Math.round(p)}%</div>
                 </div>);
@@ -1157,9 +1224,10 @@ td.t2 { color: #666; white-space: nowrap; }
               </div>
 
               <div style={{ background: G.bg2, borderRadius: 12, padding: 16, marginBottom: 14, border: `1px solid ${G.bdr}` }}>
-                <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>Cash Flow</div>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span style={{ fontSize: 15, color: G.t2 }}>Cash</span><span style={{ fontSize: 15, fontWeight: 700 }}>{formatINR(ti.cash)}</span></div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 15, color: G.t2 }}>Bank</span><span style={{ fontSize: 15, fontWeight: 700 }}>{formatINR(ti.bank)}</span></div>
+                <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>Payment Breakdown</div>
+                {Object.entries(ti.byPay).sort((a, b) => b[1] - a[1]).map(([pid, amt]) => (
+                  <div key={pid} style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span style={{ fontSize: 15, color: G.t2 }}>{getPayLabel(pid)}</span><span style={{ fontSize: 15, fontWeight: 700 }}>{formatINR(amt)}</span></div>
+                ))}
               </div>
 
               <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
@@ -1198,7 +1266,7 @@ td.t2 { color: #666; white-space: nowrap; }
           >
             <div style={{ width: 36, height: 4, borderRadius: 2, background: G.lt, margin: "0 auto 18px" }} />
             <div style={{ fontSize: 34, fontWeight: 800, letterSpacing: -1, marginBottom: 16 }}>{formatINR(detMod.amount)}</div>
-            {[["Category", getCL(detMod)], ["Payment", detMod.payMode === "cash" ? "Cash" : "Bank"], ["Note", detMod.note || "\u2014"], ["Date", tfd(detMod.date)], ["Time", tts(detMod.date)]].map(([l, v]) => (
+            {[["Category", getCL(detMod)], ["Payment", getPayLabel(detMod.payMode)], ["Note", detMod.note || "\u2014"], ["Date", tfd(detMod.date)], ["Time", tts(detMod.date)]].map(([l, v]) => (
               <div key={l} style={{ display: "flex", justifyContent: "space-between", padding: "11px 0", borderBottom: `1px solid ${G.lt}`, fontSize: 16 }}>
                 <span style={{ color: G.t3, fontWeight: 500 }}>{l}</span><span style={{ color: G.t1, fontWeight: 600, textAlign: "right", maxWidth: "60%" }}>{v}</span>
               </div>
@@ -1227,7 +1295,10 @@ td.t2 { color: #666; white-space: nowrap; }
       {/* ══════ KEY MODAL ══════ */}
       {keyMod && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 999 }} onClick={() => setKeyMod(false)}>
-          <div style={{ width: "100%", maxWidth: 390, background: G.bg, borderRadius: "20px 20px 0 0", padding: "24px 20px 40px", maxHeight: "85vh", overflowY: "auto" }} onClick={e => e.stopPropagation()}>
+          <div
+            onTouchStart={e => { mRef.current.ky = e.touches[0].clientY; }}
+            onTouchEnd={e => { if (e.changedTouches[0].clientY - mRef.current.ky > 80) setKeyMod(false); }}
+            style={{ width: "100%", maxWidth: 390, background: G.bg, borderRadius: "20px 20px 0 0", padding: "24px 20px 40px", maxHeight: "85vh", overflowY: "auto" }} onClick={e => e.stopPropagation()}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
               <div style={{ width: 30 }} />
               <div style={{ width: 36, height: 4, borderRadius: 2, background: G.lt }} />
@@ -1260,23 +1331,14 @@ td.t2 { color: #666; white-space: nowrap; }
               </button>
             )}
 
-            {/* Banks & Cards */}
-            <div style={{ background: G.bg2, borderRadius: 12, padding: "12px 14px", marginBottom: 16 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: G.t1 }}>Banks & Cards</div>
-                  <div style={{ fontSize: 12, color: G.t3, marginTop: 2 }}>{banks.length === 0 ? "Add your banks to set up automations" : `${banks.length} configured`}</div>
-                </div>
-                <button onClick={openBankMod} style={{ padding: "7px 14px", borderRadius: 8, border: `2px solid ${G.bdr}`, background: G.bg, color: G.t1, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>{banks.length === 0 ? "+ Add" : "Edit"}</button>
+            {/* Banks info */}
+            {banks.length > 0 && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+                {banks.map(b => (
+                  <span key={b.id} style={{ padding: "4px 10px", borderRadius: 6, background: G.bg2, border: `1px solid ${G.bdr}`, fontSize: 12, color: G.t2 }}>{b.label}{b.last4 ? ` ·${b.last4}` : ""}{b.type === "credit_card" ? " Card" : ""}</span>
+                ))}
               </div>
-              {banks.length > 0 && (
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
-                  {banks.map(b => (
-                    <span key={b.id} style={{ padding: "4px 10px", borderRadius: 6, background: G.bg, border: `1px solid ${G.bdr}`, fontSize: 12, color: G.t2 }}>{b.label}{b.last4 ? ` ·${b.last4}` : ""}{b.type === "credit_card" ? " 💳" : " 🏦"}</span>
-                  ))}
-                </div>
-              )}
-            </div>
+            )}
 
             {/* Platform Tabs */}
             <div style={{ display: "flex", background: G.bg2, borderRadius: 10, padding: 3, marginBottom: 16 }}>
@@ -1292,27 +1354,26 @@ td.t2 { color: #666; white-space: nowrap; }
 
                 <div style={{ marginBottom: 14 }}>
                   <div style={{ fontWeight: 700, color: G.t1, marginBottom: 4 }}>Step 1: Add the Shortcut</div>
-                  {SHORTCUT_ICLOUD_URL ? (
-                    <>
-                      <div style={{ marginBottom: 6 }}>Tap below to add the "Log Expense" shortcut to your iPhone.</div>
-                      <a href={SHORTCUT_ICLOUD_URL} target="_blank" rel="noopener noreferrer"
-                        style={{ display: "block", padding: "12px", borderRadius: 10, border: `2px solid ${G.bdr}`, background: G.bg, color: G.t1, fontSize: 14, fontWeight: 700, textAlign: "center", textDecoration: "none", cursor: "pointer" }}>
-                        Get Shortcut {"\u2192"}
-                      </a>
-                      <div style={{ fontSize: 12, color: G.t3, marginTop: 6 }}>After adding, open it once and paste your API key when prompted.</div>
-                    </>
-                  ) : (
-                    <div style={{ fontSize: 12, color: G.t3 }}>Shortcut link coming soon. Contact the admin for the shortcut file.</div>
-                  )}
+                  <div style={{ marginBottom: 6 }}>Tap below to add the "Log Expense" shortcut to your iPhone.</div>
+                  <a href={SHORTCUT_ICLOUD_URL} target="_blank" rel="noopener noreferrer"
+                    style={{ display: "block", padding: "12px", borderRadius: 10, border: `2px solid ${G.bdr}`, background: G.bg, color: G.t1, fontSize: 14, fontWeight: 700, textAlign: "center", textDecoration: "none", cursor: "pointer" }}>
+                    Get Shortcut {"\u2192"}
+                  </a>
+                  <div style={{ fontSize: 12, color: G.t3, marginTop: 6 }}>After adding, open the shortcut once. It will ask for your API key — paste it from above. The key is saved and never asked again.</div>
+                </div>
+
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontWeight: 700, color: G.t1, marginBottom: 4 }}>Step 2: Fix Category Display</div>
+                  <div style={{ fontSize: 12, color: G.t3, lineHeight: 1.6 }}>If you see category IDs instead of names in the picker, edit the shortcut and ensure the "Choose from List" action uses the <b>categories_list</b> value (flat list of names), not <b>categories_map</b>.</div>
                 </div>
 
                 <div style={{ marginBottom: 12 }}>
-                  <div style={{ fontWeight: 700, color: G.t1, marginBottom: 4 }}>Step 2: Create Automation</div>
+                  <div style={{ fontWeight: 700, color: G.t1, marginBottom: 4 }}>Step 3: Create Automation</div>
                   <div>Open <b>Shortcuts</b> app {"\u2192"} <b>Automation</b> tab {"\u2192"} <b>+</b></div>
                   <div>Select <b>Message</b> trigger</div>
                   <div style={{ background: G.bg, borderRadius: 8, padding: "10px 12px", marginTop: 6, fontSize: 12, lineHeight: 1.7 }}>
-                    <div><b>Sender contains:</b> your bank name (e.g. "HDFC")</div>
-                    <div><b>Message contains:</b> debited</div>
+                    <div><b>Sender contains:</b> <span style={{ color: G.t3 }}>(leave blank)</span></div>
+                    <div><b>Message contains:</b> your bank name (e.g. "Kotak Bank")</div>
                   </div>
                   <div style={{ marginTop: 6 }}>Set the action:</div>
                   <div style={{ background: G.bg, borderRadius: 8, padding: "10px 12px", marginTop: 4, fontSize: 12, lineHeight: 1.7 }}>
@@ -1323,7 +1384,7 @@ td.t2 { color: #666; white-space: nowrap; }
                 </div>
 
                 <div style={{ fontSize: 12, color: G.t3, borderTop: `1px solid ${G.lt}`, paddingTop: 10 }}>
-                  Tip: For multiple banks, create one automation per bank. They all use the same "Log Expense" shortcut.
+                  Tip: For multiple banks, create one automation per bank. They all use the same "Log Expense" shortcut. The system auto-identifies which bank sent the SMS.
                 </div>
               </div>
             )}
@@ -1416,25 +1477,20 @@ td.t2 { color: #666; white-space: nowrap; }
           <div style={{ width: "100%", maxWidth: 390, background: G.bg, borderRadius: "20px 20px 0 0", padding: "24px 20px 40px", maxHeight: "80vh", overflowY: "auto" }} onClick={e => e.stopPropagation()}>
             <div style={{ width: 36, height: 4, borderRadius: 2, background: G.lt, margin: "0 auto 18px" }} />
             <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 4 }}>Banks & Cards</div>
-            <div style={{ fontSize: 13, color: G.t3, marginBottom: 20 }}>Add your bank accounts and credit cards. The SMS sender name helps set up automation.</div>
+            <div style={{ fontSize: 13, color: G.t3, marginBottom: 20 }}>Add your banks and cards. These appear as payment options when logging expenses.</div>
             {editBanks.map((b, i) => (
-              <div key={b.id} style={{ background: G.bg2, borderRadius: 12, padding: "12px 14px", marginBottom: 10, border: `1px solid ${G.bdr}` }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
-                  <input type="text" value={b.label} onChange={e => setEditBanks(p => p.map((x, j) => j === i ? { ...x, label: e.target.value } : x))} placeholder="Bank / Card name" maxLength={30} style={{ flex: 1, padding: "9px 12px", borderRadius: 8, border: `2px solid ${G.bdr}`, fontSize: 15, outline: "none", background: G.bg, color: G.t1, boxSizing: "border-box", minWidth: 0 }} />
-                  <button onClick={() => setEditBanks(p => p.filter((_, j) => j !== i))} style={{ width: 34, height: 34, borderRadius: 8, border: `2px solid ${G.bdr}`, background: G.bg, color: "#FF3B30", fontSize: 16, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>{"\u2715"}</button>
-                </div>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <select value={b.type} onChange={e => setEditBanks(p => p.map((x, j) => j === i ? { ...x, type: e.target.value } : x))} style={{ flex: 1, padding: "8px 10px", borderRadius: 8, border: `2px solid ${G.bdr}`, fontSize: 13, color: G.t2, background: G.bg, outline: "none" }}>
-                    <option value="bank">Bank Account</option>
-                    <option value="credit_card">Credit Card</option>
-                  </select>
-                  <input type="text" value={b.sender || ""} onChange={e => setEditBanks(p => p.map((x, j) => j === i ? { ...x, sender: e.target.value } : x))} placeholder="SMS sender (e.g. HDFCBK)" maxLength={20} style={{ flex: 1, padding: "8px 10px", borderRadius: 8, border: `2px solid ${G.bdr}`, fontSize: 13, outline: "none", background: G.bg, color: G.t1, boxSizing: "border-box", minWidth: 0 }} />
-                  <input type="text" value={b.last4 || ""} onChange={e => setEditBanks(p => p.map((x, j) => j === i ? { ...x, last4: e.target.value.replace(/[^0-9]/g, "") } : x))} placeholder="Last 4" maxLength={4} style={{ width: 56, padding: "8px 8px", borderRadius: 8, border: `2px solid ${G.bdr}`, fontSize: 13, outline: "none", background: G.bg, color: G.t1, boxSizing: "border-box", textAlign: "center" }} />
-                </div>
+              <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
+                <input type="text" value={b.label} onChange={e => setEditBanks(p => p.map((x, j) => j === i ? { ...x, label: e.target.value } : x))} placeholder="e.g. HDFC, Kotak" maxLength={20} style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: `2px solid ${G.bdr}`, fontSize: 15, outline: "none", background: G.bg2, color: G.t1, boxSizing: "border-box", minWidth: 0 }} />
+                <select value={b.type} onChange={e => setEditBanks(p => p.map((x, j) => j === i ? { ...x, type: e.target.value } : x))} style={{ padding: "10px 8px", borderRadius: 10, border: `2px solid ${G.bdr}`, fontSize: 13, color: G.t2, background: G.bg2, outline: "none" }}>
+                  <option value="bank">Account</option>
+                  <option value="credit_card">Card</option>
+                </select>
+                <input type="text" value={b.last4 || ""} onChange={e => setEditBanks(p => p.map((x, j) => j === i ? { ...x, last4: e.target.value.replace(/[^0-9]/g, "") } : x))} placeholder="Last 4" maxLength={4} style={{ width: 56, padding: "10px 8px", borderRadius: 10, border: `2px solid ${G.bdr}`, fontSize: 13, outline: "none", background: G.bg2, color: G.t1, boxSizing: "border-box", textAlign: "center" }} />
+                <button onClick={() => setEditBanks(p => p.filter((_, j) => j !== i))} style={{ width: 36, height: 36, borderRadius: 10, border: `2px solid ${G.bdr}`, background: G.bg, color: "#FF3B30", fontSize: 16, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>{"\u2715"}</button>
               </div>
             ))}
             {editBanks.length < 10 && (
-              <button onClick={() => setEditBanks(p => [...p, { id: "bnk_" + Date.now().toString(36), label: "", type: "bank", sender: "", last4: "" }])} style={{ width: "100%", padding: "11px", borderRadius: 10, border: `2px dashed ${G.bdr}`, background: "transparent", color: G.t3, fontSize: 15, fontWeight: 600, cursor: "pointer", marginBottom: 4 }}>+ Add Bank / Card</button>
+              <button onClick={() => setEditBanks(p => [...p, { id: "bnk_" + Date.now().toString(36), label: "", type: "bank", last4: "" }])} style={{ width: "100%", padding: "11px", borderRadius: 10, border: `2px dashed ${G.bdr}`, background: "transparent", color: G.t3, fontSize: 15, fontWeight: 600, cursor: "pointer", marginBottom: 4 }}>+ Add Bank / Card</button>
             )}
             <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
               <button onClick={() => setBankMod(false)} style={{ padding: "12px 18px", borderRadius: 12, border: `2px solid ${G.bdr}`, background: G.bg, color: G.t3, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
