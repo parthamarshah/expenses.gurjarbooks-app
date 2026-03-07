@@ -1320,6 +1320,7 @@ td.t2 { color: #666; white-space: nowrap; }
                   </div>
                   <button onClick={copyKey} style={{ background: G.bk, color: G.wh, border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", flexShrink: 0, marginLeft: "auto" }}>Copy</button>
                 </div>
+                <div style={{ fontSize: 12, color: G.t3, marginBottom: 8, lineHeight: 1.4 }}>Copy this key and paste it when the shortcuts below ask for it on first run.</div>
                 <button onClick={handleGenerateKey} disabled={keyLoading}
                   style={{ width: "100%", padding: "10px", borderRadius: 10, border: `1.5px solid ${G.bdr}`, background: G.bg, color: G.t3, fontSize: 13, fontWeight: 600, cursor: "pointer", marginBottom: 16 }}>
                   {keyLoading ? "Generating\u2026" : "Regenerate Key"}
