@@ -164,6 +164,11 @@ export default function ExpenseTracker() {
       }
       setDbReady(true);
 
+      // Onboarding: show guide for brand-new users (0 expenses, not previously dismissed)
+      if ((!expRows || expRows.length === 0)) {
+        try { if (!localStorage.getItem(`onboarded_${userId}`)) setOnboardStep(0); } catch {}
+      }
+
       expsChannel = supabase.channel(`exp:${userId}`)
         .on("postgres_changes",
           { event: "*", schema: "public", table: "expenses", filter: `user_id=eq.${userId}` },
@@ -186,24 +191,6 @@ export default function ExpenseTracker() {
     init();
     return () => { expsChannel?.unsubscribe(); tripsChannel?.unsubscribe(); };
   }, [userId]);
-
-  // ── Onboarding guide for new users ─────────────────────────────────────
-  // After data loads, if user has 0 expenses and hasn't been onboarded, show welcome guide.
-  const onboardChecked = useRef(null);
-  useEffect(() => {
-    if (!dbReady || !userId) return;
-    if (onboardChecked.current === userId) return;
-    onboardChecked.current = userId;
-    try { if (localStorage.getItem(`onboarded_${userId}`)) return; } catch {}
-    // Small delay to let state settle after init() batch
-    const t = setTimeout(() => {
-      setExps(prev => {
-        if (prev.length === 0) setOnboardStep(0);
-        return prev;
-      });
-    }, 300);
-    return () => clearTimeout(t);
-  }, [dbReady, userId]);
 
   const dismissOnboard = useCallback(() => {
     setOnboardStep(null);

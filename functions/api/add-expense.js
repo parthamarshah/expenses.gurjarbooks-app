@@ -56,8 +56,21 @@ export async function onRequestPost(context) {
   } else if (category.startsWith("custom_") || ["personal", "work", "home", "investment"].includes(category)) {
     catId = category;
   } else {
-    const catMap = { savings: "investment" };
-    catId = catMap[category] || "personal";
+    // Try resolving by label (e.g., "Personal" → "personal", "Savings" → "investment")
+    const labelMap = { personal: "personal", work: "work", home: "home", savings: "investment", investment: "investment" };
+    if (labelMap[category]) {
+      catId = labelMap[category];
+    } else {
+      // Check user's custom categories by label match
+      const { data: prefsRow } = await supabase.from("user_prefs").select("cats_json").eq("user_id", userId).maybeSingle();
+      if (prefsRow?.cats_json) {
+        try {
+          const cats = JSON.parse(prefsRow.cats_json);
+          const match = cats.find(c => c.label && c.label.toLowerCase() === category);
+          if (match) catId = match.id;
+        } catch {}
+      }
+    }
   }
 
   const expId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
