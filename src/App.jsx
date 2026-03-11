@@ -1532,7 +1532,7 @@ td.t2 { color: #666; white-space: nowrap; }
               <div style={{ fontSize: 14, color: G.t2, lineHeight: 1.6, marginBottom: 20 }}>Let's get you set up in under a minute. You can always change these later.</div>
               <div style={{ background: G.bg2, borderRadius: 14, padding: "16px 18px", marginBottom: 16 }}>
                 <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>1. Customise Categories</div>
-                <div style={{ fontSize: 13, color: G.t2, lineHeight: 1.5, marginBottom: 12 }}>You start with Personal, Work, Home & Savings. Add your own categories or hide ones you don't need.</div>
+                <div style={{ fontSize: 13, color: G.t2, lineHeight: 1.5, marginBottom: 12 }}>You start with Groceries, Food, Travel, Entertainment & more. Add your own or hide ones you don't need.</div>
                 <button onClick={() => { onboardReturn.current = 0; onboardAdvance.current = 1; setOnboardStep(null); setCatMod(true); setEditCats(cats.map(c => ({ ...c }))); }} style={{ width: "100%", padding: "11px", borderRadius: 10, border: `2px solid ${G.bk}`, background: G.bk, color: G.wh, fontSize: 14, fontWeight: 700, cursor: "pointer" }}>Edit Categories</button>
               </div>
             </>}
