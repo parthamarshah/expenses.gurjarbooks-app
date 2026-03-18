@@ -97,10 +97,10 @@ export default function ExpenseTracker() {
   const [insPeriod,   setInsPeriod]   = useState("month");
   const [insMonth,    setInsMonth]    = useState(() => { const n = new Date(); return { year: n.getFullYear(), month: n.getMonth() }; });
   const [insYear,     setInsYear]     = useState(() => new Date().getFullYear());
-  // History period: "all" | "month" | "year"
-  const [histPeriod,  setHistPeriod]  = useState("all");
-  const [histMonth,   setHistMonth]   = useState(() => { const n = new Date(); return { year: n.getFullYear(), month: n.getMonth() }; });
-  const [histYear,    setHistYear]    = useState(() => new Date().getFullYear());
+  // History period: "all" | "month" | "year" — persisted to localStorage
+  const [histPeriod,  setHistPeriod]  = useState(() => { try { return localStorage.getItem("histPeriod") || "month"; } catch { return "month"; } });
+  const [histMonth,   setHistMonth]   = useState(() => { const n = new Date(); try { const s = localStorage.getItem("histMonth"); if (s) return JSON.parse(s); } catch {} return { year: n.getFullYear(), month: n.getMonth() }; });
+  const [histYear,    setHistYear]    = useState(() => { try { const s = localStorage.getItem("histYear"); if (s) return Number(s); } catch {} return new Date().getFullYear(); });
   const [editDate,  setEditDate]  = useState("");
   const [keyMod,     setKeyMod]     = useState(false);
   const [userKey,    setUserKey]    = useState(null);
@@ -438,9 +438,7 @@ export default function ExpenseTracker() {
         return (e.note || "").toLowerCase().includes(q) || e.amount.toString().includes(q) || catLabel.includes(q) || payLabel.includes(q);
       });
     }
-    // All-time and yearly: chronological (oldest first); monthly: newest first
-    if (histPeriod === "all" || histPeriod === "year") l.sort((a, b) => new Date(a.date) - new Date(b.date));
-    return l;
+    return l; // exps is always newest-first; filtering preserves that order
   }, [exps, fCat, fPay, sq, selTrip, allCats, histPeriod, histMonth, histYear]);
 
   // ── Export ────────────────────────────────────────────────────────────────
@@ -811,15 +809,25 @@ ${breakdownHtml}
       setHistMonth(prev => {
         let m = prev.month + dir, y = prev.year;
         if (m < 0) { m = 11; y--; } if (m > 11) { m = 0; y++; }
-        return { year: y, month: m };
+        const next = { year: y, month: m };
+        try { localStorage.setItem("histMonth", JSON.stringify(next)); } catch {}
+        return next;
       });
     } else if (histPeriod === "year") {
-      setHistYear(prev => prev + dir);
+      setHistYear(prev => {
+        const next = prev + dir;
+        try { localStorage.setItem("histYear", String(next)); } catch {}
+        return next;
+      });
     }
   }, [histPeriod]);
 
   const cycleHistPeriod = useCallback(() => {
-    setHistPeriod(p => p === "all" ? "month" : p === "month" ? "year" : "all");
+    setHistPeriod(p => {
+      const next = p === "all" ? "month" : p === "month" ? "year" : "all";
+      try { localStorage.setItem("histPeriod", next); } catch {}
+      return next;
+    });
   }, []);
 
   // ── Trip insights ─────────────────────────────────────────────────────────
@@ -1172,7 +1180,7 @@ ${breakdownHtml}
                 const p = ins.totM > 0 ? (a / ins.totM * 100) : 0;
                 const barCol = catColorMap[cid] || "#8E8E93";
                 return (
-                  <div key={cid} onClick={() => { hap(); setSelTrip(null); setFPay("all"); setSq(""); setFCat(cid); setHistPeriod(insPeriod); setHistMonth(insMonth); setHistYear(insYear); setSw({ id: null, dir: null }); setSwipeConf(null); setView("list"); }} style={{ marginBottom: 14, cursor: "pointer" }}>
+                  <div key={cid} onClick={() => { hap(); setSelTrip(null); setFPay("all"); setSq(""); setFCat(cid); setHistPeriod(insPeriod); setHistMonth(insMonth); setHistYear(insYear); try { localStorage.setItem("histPeriod", insPeriod); localStorage.setItem("histMonth", JSON.stringify(insMonth)); localStorage.setItem("histYear", String(insYear)); } catch {} setSw({ id: null, dir: null }); setSwipeConf(null); setView("list"); }} style={{ marginBottom: 14, cursor: "pointer" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: G.t2, marginBottom: 5 }}><span style={gujStyle(c.label, 15)}>{c.icon} {c.label}</span><span style={{ fontWeight: 700, color: G.t1 }}>{formatINR(a)}</span></div>
                     <div style={{ height: 7, background: G.bg3, borderRadius: 8, overflow: "hidden" }}><div style={{ height: 7, borderRadius: 8, background: barCol, width: `${p}%`, transition: "width .4s" }} /></div>
                     <div style={{ fontSize: 12, color: G.tm, marginTop: 3, textAlign: "right" }}>{Math.round(p)}%</div>
@@ -1186,7 +1194,7 @@ ${breakdownHtml}
               <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>By Payment Mode <span style={{ fontSize: 12, color: G.tm, fontWeight: 400 }}>{"\u00B7"} tap to filter history</span></div>
               {(() => { const PAY_COLORS = ["#3498DB", "#2ECC71", "#E74C3C", "#F39C12", "#9B59B6", "#1ABC9C"]; return Object.entries(ins.bp).sort((a, b) => b[1] - a[1]).map(([pid, a], i) => {
                 const p = ins.totM > 0 ? (a / ins.totM * 100) : 0;
-                return (<div key={pid} onClick={() => { hap(); setSelTrip(null); setFCat("all"); setSq(""); setFPay(pid); setHistPeriod(insPeriod); setHistMonth(insMonth); setHistYear(insYear); setSw({ id: null, dir: null }); setSwipeConf(null); setView("list"); }} style={{ marginBottom: 14, cursor: "pointer" }}>
+                return (<div key={pid} onClick={() => { hap(); setSelTrip(null); setFCat("all"); setSq(""); setFPay(pid); setHistPeriod(insPeriod); setHistMonth(insMonth); setHistYear(insYear); try { localStorage.setItem("histPeriod", insPeriod); localStorage.setItem("histMonth", JSON.stringify(insMonth)); localStorage.setItem("histYear", String(insYear)); } catch {} setSw({ id: null, dir: null }); setSwipeConf(null); setView("list"); }} style={{ marginBottom: 14, cursor: "pointer" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: G.t2, marginBottom: 5 }}><span>{getPayLabel(pid)}</span><span style={{ fontWeight: 700, color: G.t1 }}>{formatINR(a)}</span></div>
                   <div style={{ height: 7, background: G.bg3, borderRadius: 8, overflow: "hidden" }}><div style={{ height: 7, borderRadius: 8, background: PAY_COLORS[i % PAY_COLORS.length], width: `${p}%`, transition: "width .4s" }} /></div>
                   <div style={{ fontSize: 12, color: G.tm, marginTop: 3, textAlign: "right" }}>{Math.round(p)}%</div>
