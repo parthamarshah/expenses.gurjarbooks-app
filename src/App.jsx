@@ -22,6 +22,8 @@ const NEW_DEFAULT_CATEGORIES = [
 ];
 // Alias used by the cat modal Reset button
 const DEFAULT_CATEGORIES = OLD_DEFAULT_CATEGORIES;
+// System sentinel for uncategorized expenses (not in user's cats, not shown in Add form)
+const UNCAT = { id: "uncategorized", label: "No Category", icon: "—" };
 // iCloud Shortcut links — update after sharing/re-sharing
 const SHORTCUT_ICLOUD_URL = "https://www.icloud.com/shortcuts/4dbf6ffb530347beb3c13f0969304d60"; // Bank/SMS expense
 const CASH_SHORTCUT_URL   = "https://www.icloud.com/shortcuts/de22d5366b2a44c18bfe327c6387d0bf"; // Manual cash expense
@@ -254,11 +256,24 @@ export default function ExpenseTracker() {
 
   // Stable color per category/trip — sequential position, no hash collisions
   const catColorMap = useMemo(() => {
-    const m = {}; allCats.forEach((c, i) => { m[c.id] = CAT_COLOR_PALETTE[i % CAT_COLOR_PALETTE.length]; }); return m;
+    const m = { uncategorized: "#8E8E93" }; allCats.forEach((c, i) => { m[c.id] = CAT_COLOR_PALETTE[i % CAT_COLOR_PALETTE.length]; }); return m;
   }, [allCats]);
 
-  // Visible categories only — used for history filter dropdowns
+  // Visible categories only — used for Add form category grid
   const visCats = useMemo(() => allCats.filter(c => !c.hidden), [allCats]);
+
+  // Dynamic history filter: only categories that have expenses in the selected period
+  const activeFilterCats = useMemo(() => {
+    let periodExps = [...exps];
+    if (histPeriod === "month") periodExps = periodExps.filter(e => { const d = new Date(e.date); return d.getMonth() === histMonth.month && d.getFullYear() === histMonth.year; });
+    else if (histPeriod === "year") periodExps = periodExps.filter(e => new Date(e.date).getFullYear() === histYear);
+    if (selTrip) periodExps = periodExps.filter(e => e.tripId === selTrip);
+    const activeCatIds = new Set(periodExps.map(e => e.tripId ? `trip_${e.tripId}` : e.category));
+    const result = visCats.filter(c => activeCatIds.has(c.id));
+    trips.filter(t => !t.archived && activeCatIds.has(`trip_${t.id}`)).forEach(t => result.push({ id: `trip_${t.id}`, label: `✈️ ${t.name}` }));
+    if (activeCatIds.has("uncategorized")) result.push(UNCAT);
+    return result;
+  }, [exps, visCats, trips, histPeriod, histMonth, histYear, selTrip]);
 
   // Dynamic payment modes: Cash + user's configured banks/cards
   const payModes = useMemo(() => {
@@ -857,8 +872,8 @@ ${breakdownHtml}
     else { setSw({ id: null, dir: null }); setSwipeConf(null); }
   }, [exps, doEdit]);
 
-  const getCL = (e) => { if (e.tripId) { const t = trips.find(x => x.id === e.tripId); return t ? t.name : "Trip"; } return cats.find(c => c.id === e.category)?.label || e.category; };
-  const getCI = (e) => { if (e.tripId) return "\u2708\uFE0F"; return cats.find(c => c.id === e.category)?.icon || "?"; };
+  const getCL = (e) => { if (e.tripId) { const t = trips.find(x => x.id === e.tripId); return t ? t.name : "Trip"; } if (e.category === "uncategorized") return UNCAT.label; return cats.find(c => c.id === e.category)?.label || e.category; };
+  const getCI = (e) => { if (e.tripId) return "\u2708\uFE0F"; if (e.category === "uncategorized") return UNCAT.icon; return cats.find(c => c.id === e.category)?.icon || "?"; };
 
   const navTo = (t) => { hap(); if (t === "list") { setSelTrip(null); setFCat("all"); setFPay("all"); setSq(""); } setSw({ id: null, dir: null }); setSwipeConf(null); setView(t); };
   const viewTH = (tid) => { setSelTrip(tid); setFCat("all"); setFPay("all"); setSq(""); setHistPeriod("all"); setView("list"); };
@@ -1003,7 +1018,7 @@ ${breakdownHtml}
               <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
                 <select value={fCat} onChange={e => setFCat(e.target.value)} style={{ flex: 1, padding: "11px 10px", borderRadius: 10, border: `2px solid ${G.bdr}`, fontSize: 15, color: G.t2, background: G.bg, outline: "none" }}>
                   <option value="all">All Categories</option>
-                  {visCats.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+                  {activeFilterCats.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
                 </select>
                 <select value={fPay} onChange={e => setFPay(e.target.value)} style={{ flex: 1, padding: "11px 10px", borderRadius: 10, border: `2px solid ${G.bdr}`, fontSize: 15, color: G.t2, background: G.bg, outline: "none" }}>
                   <option value="all">All Modes</option>
@@ -1148,7 +1163,8 @@ ${breakdownHtml}
                 const d = frac >= 0.999
                   ? `M 50 5 A 45 45 0 1 1 49.99 5 Z`
                   : `M 50 50 L ${x1} ${y1} A 45 45 0 ${largeArc} 1 ${x2} ${y2} Z`;
-                return { cid, d, color: catColorMap[cid] || "#8E8E93", label: (allCats.find(x => x.id === cid) || cats[0] || { label: "Other" }).label, pct: Math.round(frac * 100) };
+                const catObj = cid === "uncategorized" ? UNCAT : (allCats.find(x => x.id === cid) || cats[0] || { label: "Other" });
+                return { cid, d, color: catColorMap[cid] || "#8E8E93", label: catObj.label, pct: Math.round(frac * 100) };
               });
               return (
                 <div style={{ marginBottom: 22, background: G.bg2, borderRadius: 14, padding: "16px 14px", border: `1px solid ${G.bdr}` }}>
@@ -1176,7 +1192,7 @@ ${breakdownHtml}
             <div style={{ marginBottom: 22 }}>
               <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>By Category <span style={{ fontSize: 12, color: G.tm, fontWeight: 400 }}>· tap to filter history</span></div>
               {(() => { return Object.entries(ins.bc).sort((a, b) => b[1] - a[1]).map(([cid, a]) => {
-                const c = allCats.find(x => x.id === cid) || cats[0];
+                const c = cid === "uncategorized" ? UNCAT : (allCats.find(x => x.id === cid) || cats[0]);
                 const p = ins.totM > 0 ? (a / ins.totM * 100) : 0;
                 const barCol = catColorMap[cid] || "#8E8E93";
                 return (
@@ -1368,6 +1384,9 @@ ${breakdownHtml}
                 <span style={{ color: G.t3, fontWeight: 500 }}>{l}</span><span style={{ color: G.t1, fontWeight: 600, textAlign: "right", maxWidth: "60%", ...(l === "Category" || l === "Note" ? gujStyle(v, 16) : {}) }}>{v}</span>
               </div>
             ))}
+            {detMod.category === "uncategorized" && (
+              <button onClick={() => doEdit(detMod)} style={{ width: "100%", padding: "14px", borderRadius: 14, border: "none", background: "#FF9500", color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer", marginTop: 16, marginBottom: -4 }}>Categorize This Expense</button>
+            )}
             <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
               <button onClick={() => doEdit(detMod)} style={{ flex: 1, padding: "14px", borderRadius: 12, border: `2px solid ${G.bdr}`, background: G.bg, color: G.t1, fontSize: 16, fontWeight: 700, cursor: "pointer" }}>Edit</button>
               <button onClick={() => doDel(detMod.id)} style={{ flex: 1, padding: "14px", borderRadius: 12, border: "none", background: G.dk, color: G.wh, fontSize: 16, fontWeight: 700, cursor: "pointer" }}>Delete</button>

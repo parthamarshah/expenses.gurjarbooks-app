@@ -38,7 +38,7 @@ export async function onRequestPost(context) {
 
   const userId   = keyRow.user_id;
   const sms      = (body.sms      || "").trim();
-  const category = (body.category || "personal").trim().toLowerCase();
+  const category = (body.category || "auto").trim();
   let   payMode  = (body.pay_mode || "").trim();
 
   if (!sms || sms.length > 1000) {
@@ -136,9 +136,12 @@ export async function onRequestPost(context) {
   // Step 6: Parse merchant/note (bank-aware)
   const note = parseSmsNote(sms, bank);
 
-  // Load user's categories from prefs for dynamic label→id mapping
-  const { data: prefsData } = await supabase
-    .from("user_prefs").select("cats_json").eq("user_id", userId).maybeSingle();
+  // Load user's categories + trips in parallel for category resolution + shortcut response
+  const [{ data: prefsData }, { data: tripsData }] = await Promise.all([
+    supabase.from("user_prefs").select("cats_json").eq("user_id", userId).maybeSingle(),
+    supabase.from("trips").select("id, name, pinned").eq("user_id", userId)
+      .eq("archived", false).order("pinned", { ascending: false }),
+  ]);
 
   let userCats = [
     { id: "personal",   label: "Personal", icon: "👤" },
@@ -153,21 +156,40 @@ export async function onRequestPost(context) {
     } catch {}
   }
 
-  // Handle trip categories and fixed categories
-  // Accept IDs ("personal"), label strings ("Groceries"), or emoji+label ("🛒 Groceries")
-  let catId = userCats[0]?.id || "personal";
+  // Handle category resolution: "auto" → smart auto-categorize, else resolve normally
+  let catId = "uncategorized";
   let tripId = null;
-
   const catLower = category.toLowerCase().trim();
-  if (catLower.startsWith("trip_")) {
+
+  if (!category || catLower === "auto") {
+    // ── Smart auto-categorize from note history ──
+    const keyword = (note || "").replace(/[^a-zA-Z\s]/g, "").trim().split(/\s+/)[0];
+    if (keyword && keyword.length >= 3) {
+      const { data: prev } = await supabase
+        .from("expenses")
+        .select("category")
+        .eq("user_id", userId)
+        .ilike("note", `%${keyword}%`)
+        .neq("category", "trip")
+        .neq("category", "uncategorized")
+        .order("date", { ascending: false })
+        .limit(1);
+      catId = prev?.[0]?.category || "uncategorized";
+    }
+    // Validate category still exists in user's categories
+    if (catId !== "uncategorized" && !userCats.some(c => c.id === catId)) {
+      catId = "uncategorized";
+    }
+  } else if (catLower.startsWith("trip_")) {
     tripId = category.replace(/^trip_/i, "");
     catId = "trip";
-  } else if (catLower.startsWith("✈") || catLower.startsWith("✈️")) {
+  } else if (/^✈/.test(category)) {
     // Trip by display name (e.g. "✈️ Goa Trip")
     const tripName = category.replace(/^✈️?\s*/u, "").trim();
     const { data: tripRow } = await supabase.from("trips")
       .select("id").eq("user_id", userId).ilike("name", tripName).maybeSingle();
     if (tripRow) { tripId = tripRow.id; catId = "trip"; }
+    else catId = userCats[0]?.id || "personal";
   } else {
     // Build dynamic map: id → id, label → id, and "icon label" → id for all user cats
     const catMap = {};
@@ -179,9 +201,17 @@ export async function onRequestPost(context) {
     // Always allow savings/investment alias
     const invCat = userCats.find(c => c.id === "investment");
     if (invCat) { catMap["savings"] = "investment"; catMap["investment"] = "investment"; }
-
     catId = catMap[catLower] || userCats[0]?.id || "personal";
   }
+
+  // Build category labels + map for shortcut response (same format as /api/categories)
+  const visibleCats = userCats.filter(c => !c.hidden);
+  const catEntries = visibleCats.map(c => ({ id: c.id, label: `${c.icon} ${c.label}` }));
+  const tripEntries = (tripsData || []).map(t => ({ id: `trip_${t.id}`, label: `✈️ ${t.name}` }));
+  const allEntries = [...catEntries, ...tripEntries];
+  const labels = allEntries.map(c => c.label);
+  const categoriesMap = {};
+  allEntries.forEach(c => { categoriesMap[c.label] = c.id; });
 
   const expId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
@@ -200,7 +230,11 @@ export async function onRequestPost(context) {
     return new Response(JSON.stringify({ ok: false, error: error.message }), { status: 500, headers: cors });
   }
 
-  return new Response(JSON.stringify({ ok: true, amount, note, category: catId, trip_id: tripId, bank, pay_mode: payMode, logged_for: userId }), { headers: cors });
+  return new Response(JSON.stringify({
+    ok: true, id: expId, amount, note, category: catId, trip_id: tripId,
+    bank, pay_mode: payMode, logged_for: userId,
+    labels, categories_map: categoriesMap,
+  }), { headers: cors });
 }
 
 export async function onRequestOptions() {
