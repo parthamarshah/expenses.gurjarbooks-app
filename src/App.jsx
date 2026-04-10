@@ -66,6 +66,161 @@ const S = {
   expIcon: { width: 38, height: 38, borderRadius: 10, background: "transparent", border: "1.5px solid #D4D4D4", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, flexShrink: 0 },
 };
 
+const safeParse = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
+
+// period: { scope: "month"|"year"|"all", year?, month? }
+const inPeriodFor = (e, period) => {
+  if (period.scope === "all") return true;
+  const d = new Date(e.date);
+  if (period.scope === "year") return d.getFullYear() === period.year;
+  return d.getMonth() === period.month && d.getFullYear() === period.year;
+};
+
+const periodLabel = (period) => period.scope === "all" ? "All Time"
+  : period.scope === "year" ? String(period.year)
+  : new Date(period.year, period.month, 1).toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+
+// ── Mindful Insights helpers (pure, client-side only) ─────────────────────────
+const expSig = (e) => {
+  const kw = (e.note || "").toLowerCase().replace(/[^a-z\s]/g, " ").trim().split(/\s+/)
+              .find(w => w.length >= 3) || "";
+  return `${e.category}|${kw}`;
+};
+
+const checkMindfulEligibility = (exps, today) => {
+  const prev = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+  const targetMonth = { year: prev.getFullYear(), month: prev.getMonth() };
+  const months = [0, 1, 2].map(i => {
+    const d = new Date(prev.getFullYear(), prev.getMonth() - i, 1);
+    return { year: d.getFullYear(), month: d.getMonth() };
+  });
+  const counts = months.map(m => exps.filter(e => {
+    if (e.category === "investment") return false;
+    if (e.tripId) return false;
+    const d = new Date(e.date);
+    return d.getMonth() === m.month && d.getFullYear() === m.year;
+  }).length);
+  return { eligible: counts.every(c => c >= 10), targetMonth };
+};
+
+// Auto-essential: ≥3 occurrences with low variance across ≥2 calendar weeks
+const learnEssentialSigs = (exps, refDate, monthsBack = 6) => {
+  const since = new Date(refDate.getFullYear(), refDate.getMonth() - monthsBack, 1).getTime();
+  const groups = new Map();
+  for (const e of exps) {
+    if (e.category === "investment" || e.tripId) continue;
+    if (new Date(e.date).getTime() < since) continue;
+    const sig = expSig(e);
+    if (!groups.has(sig)) groups.set(sig, []);
+    groups.get(sig).push(e);
+  }
+  const essentials = new Set();
+  for (const [sig, arr] of groups) {
+    if (arr.length < 3) continue;
+    const amts = arr.map(e => e.amount);
+    const mean = amts.reduce((s, v) => s + v, 0) / amts.length;
+    const variance = amts.reduce((s, v) => s + (v - mean) ** 2, 0) / amts.length;
+    const cv = mean > 0 ? Math.sqrt(variance) / mean : 99;
+    const weeks = new Set(arr.map(e => {
+      const d = new Date(e.date);
+      const wkStart = new Date(d.getFullYear(), d.getMonth(), d.getDate() - d.getDay());
+      return `${wkStart.getFullYear()}-${wkStart.getMonth()}-${wkStart.getDate()}`;
+    }));
+    if (cv <= 0.6 && weeks.size >= 2) essentials.add(sig);
+  }
+  return essentials;
+};
+
+const computeBaselines = (exps, refDate, monthsBack = 6) => {
+  const since = new Date(refDate.getFullYear(), refDate.getMonth() - monthsBack, 1).getTime();
+  const wd = {}, we = {}, wdN = {}, weN = {};
+  for (const e of exps) {
+    if (e.category === "investment" || e.tripId) continue;
+    const d = new Date(e.date);
+    if (d.getTime() < since) continue;
+    const isWe = d.getDay() === 0 || d.getDay() === 6;
+    const cat = e.category;
+    if (isWe) { we[cat] = (we[cat] || 0) + e.amount; weN[cat] = (weN[cat] || 0) + 1; }
+    else      { wd[cat] = (wd[cat] || 0) + e.amount; wdN[cat] = (wdN[cat] || 0) + 1; }
+  }
+  const weekdayAvgByCat = {}, weekendAvgByCat = {};
+  for (const c of Object.keys(wd)) weekdayAvgByCat[c] = wdN[c] > 0 ? wd[c] / wdN[c] : 0;
+  for (const c of Object.keys(we)) weekendAvgByCat[c] = weN[c] > 0 ? we[c] / weN[c] : 0;
+  return { weekdayAvgByCat, weekendAvgByCat };
+};
+
+const timeDayWeight = (e, baselines) => {
+  const d = new Date(e.date);
+  const isWe = d.getDay() === 0 || d.getDay() === 6;
+  const baselineAvg = isWe
+    ? (baselines.weekendAvgByCat[e.category] || 0)
+    : (baselines.weekdayAvgByCat[e.category] || 0);
+  if (baselineAvg <= 0) return 1.0;
+  const ratio = e.amount / baselineAvg;
+  if (ratio <= 1.0) return 1.0;
+  return Math.min(2.0, 1.0 + Math.min(1.0, (ratio - 1) * 0.4));
+};
+
+// `history` is optional — callers that have already memoized it pass it in to
+// avoid a full 6-month rescan on every period switch.
+const buildMindfulReport = (exps, period, trips, prefs, history) => {
+  const refDate = new Date();
+  const { learnedEssentials, baselines } = history || {
+    learnedEssentials: learnEssentialSigs(exps, refDate),
+    baselines: computeBaselines(exps, refDate),
+  };
+  const essentialSigs = new Set(prefs?.essentialSigs || []);
+  const avoidableSigs = new Set(prefs?.avoidableSigs || []);
+
+  const essential = [], discretionary = [], tripExps = [];
+  let essentialSpend = 0, discretionarySpend = 0;
+  for (const e of exps) {
+    if (e.category === "investment") continue;
+    if (!inPeriodFor(e, period)) continue;
+    if (e.tripId) { tripExps.push(e); continue; }
+    const sig = expSig(e);
+    const isEss = !avoidableSigs.has(sig) && (essentialSigs.has(sig) || learnedEssentials.has(sig));
+    if (isEss) { essential.push(e); essentialSpend += e.amount; }
+    else { discretionary.push({ ...e, sig, weight: timeDayWeight(e, baselines) }); discretionarySpend += e.amount; }
+  }
+  const totalSpend = essentialSpend + discretionarySpend;
+  const discretionaryPct = totalSpend > 0 ? discretionarySpend / totalSpend : 0;
+
+  discretionary.sort((a, b) => (b.amount * b.weight) - (a.amount * a.weight));
+  let running = 0;
+  const topAvoidable = [];
+  for (const e of discretionary) {
+    topAvoidable.push(e);
+    running += e.amount;
+    if (topAvoidable.length >= 5 || running >= 0.8 * discretionarySpend) break;
+  }
+  const topAvoidablePctOfDisc = discretionarySpend > 0 ? running / discretionarySpend : 0;
+
+  const tripMap = new Map();
+  for (const e of tripExps) {
+    const t = tripMap.get(e.tripId) || { tripId: e.tripId, name: (trips.find(tr => tr.id === e.tripId)?.name || "Trip"), spend: 0, entries: 0 };
+    t.spend += e.amount; t.entries += 1;
+    tripMap.set(e.tripId, t);
+  }
+  const tripsSummary = [...tripMap.values()].sort((a, b) => b.spend - a.spend);
+  const tripSpend = tripsSummary.reduce((s, t) => s + t.spend, 0);
+
+  return {
+    scope: period.scope,
+    scopeLabel: periodLabel(period),
+    totalSpend,
+    essentialSpend,
+    discretionarySpend,
+    discretionaryPct,
+    topAvoidable,
+    topAvoidablePctOfDisc,
+    trips: tripsSummary,
+    tripSpend,
+    baselines,
+    periodEntryCount: essential.length + discretionary.length,
+  };
+};
+
 export default function ExpenseTracker() {
   // ── Auth ──────────────────────────────────────────────────────────────────
   const { session, loading: authLoading, signOut, userId, needsPasswordReset } = useAuth();
@@ -125,6 +280,8 @@ export default function ExpenseTracker() {
   const [delConfirm, setDelConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [onboardStep, setOnboardStep] = useState(null); // null = hidden, 0-2 = step index
+  const [mindfulPrefs, setMindfulPrefs] = useState({ essentialSigs: [], avoidableSigs: [], autoMonthlyPopup: true });
+  const [mindfulPopup, setMindfulPopup] = useState(null);
 
   const aRef = useRef(null);
   const tRef = useRef({});
@@ -138,6 +295,7 @@ export default function ExpenseTracker() {
     setView("list"); setDbReady(false); setExps([]); setTrips([]); setBanks([]);
     setCats(OLD_DEFAULT_CATEGORIES); setUserKey(null); setEditId(null);
     setAmt(""); setNote(""); setCat("personal"); setPay("cash");
+    setMindfulPopup(null); setMindfulPrefs({ essentialSigs: [], avoidableSigs: [], autoMonthlyPopup: true });
   }, [userId]);
 
   // ── Load data + realtime ──────────────────────────────────────────────────
@@ -145,16 +303,19 @@ export default function ExpenseTracker() {
     if (!userId) return;
     let cancelled = false;
     let expsChannel, tripsChannel;
+    let mindfulPopupTimer;
 
     const init = async () => {
       const [{ data: expRows }, { data: tripRows }, { data: prefsRow }] = await Promise.all([
         supabase.from("expenses").select("*").eq("user_id", userId).order("date", { ascending: false }),
         supabase.from("trips").select("*").eq("user_id", userId).order("created_at", { ascending: false }),
-        supabase.from("user_prefs").select("cats_json, banks_json").eq("user_id", userId).maybeSingle(),
+        supabase.from("user_prefs").select("cats_json, banks_json, mindful_json").eq("user_id", userId).maybeSingle(),
       ]);
       if (cancelled) return; // userId changed while fetching
-      setExps((expRows  || []).map(dbToExp));
-      setTrips((tripRows || []).map(dbToTrip));
+      const mappedExps = (expRows || []).map(dbToExp);
+      const mappedTrips = (tripRows || []).map(dbToTrip);
+      setExps(mappedExps);
+      setTrips(mappedTrips);
       if (prefsRow?.cats_json) {
         try {
           const saved = JSON.parse(prefsRow.cats_json);
@@ -188,7 +349,29 @@ export default function ExpenseTracker() {
           if (parsed.length > 0) setPay(parsed[0].id);
         } catch {}
       }
+      // Resilient if mindful_json column doesn't exist yet
+      const mPrefs = safeParse(prefsRow?.mindful_json) || { essentialSigs: [], avoidableSigs: [], autoMonthlyPopup: true };
+      setMindfulPrefs(mPrefs);
+
       setDbReady(true);
+
+      try {
+        if (mPrefs.autoMonthlyPopup !== false && !localStorage.getItem(`mindfulReportOptOut_${userId}`)) {
+          const today = new Date();
+          const currKey = `${today.getFullYear()}-${today.getMonth()}`;
+          const lastShown = localStorage.getItem(`lastMindfulReportMonth_${userId}`);
+          if (lastShown !== currKey) {
+            const { eligible, targetMonth } = checkMindfulEligibility(mappedExps, today);
+            if (eligible) {
+              mindfulPopupTimer = setTimeout(() => {
+                if (cancelled) return;
+                const report = buildMindfulReport(mappedExps, { scope: "month", ...targetMonth }, mappedTrips, mPrefs);
+                setMindfulPopup(report);
+              }, 800);
+            }
+          }
+        }
+      } catch {}
 
       // Onboarding: show guide for brand-new users (0 expenses, not previously dismissed)
       if ((!expRows || expRows.length === 0)) {
@@ -216,7 +399,12 @@ export default function ExpenseTracker() {
     };
 
     init();
-    return () => { cancelled = true; expsChannel?.unsubscribe(); tripsChannel?.unsubscribe(); };
+    return () => {
+      cancelled = true;
+      if (mindfulPopupTimer) clearTimeout(mindfulPopupTimer);
+      expsChannel?.unsubscribe();
+      tripsChannel?.unsubscribe();
+    };
   }, [userId]);
 
   const onboardReturn = useRef(null); // step to return to after modal closes (current step)
@@ -226,6 +414,39 @@ export default function ExpenseTracker() {
     onboardReturn.current = null;
     try { localStorage.setItem(`onboarded_${userId}`, "1"); } catch {}
   }, [userId]);
+
+  // ── Mindful Insights callbacks ──────────────────────────────────────────
+  // Ref tracks the latest prefs so rapid successive callbacks don't read stale state.
+  const mindfulPrefsRef = useRef(mindfulPrefs);
+  mindfulPrefsRef.current = mindfulPrefs;
+
+  const saveMindfulPrefs = useCallback((patch) => {
+    const next = { ...mindfulPrefsRef.current, ...patch };
+    mindfulPrefsRef.current = next;
+    setMindfulPrefs(next);
+    supabase.from("user_prefs").upsert({ user_id: userId, mindful_json: JSON.stringify(next) }).then(() => {}, () => {});
+  }, [userId]);
+
+  const dismissMindfulPopup = useCallback((optOut = false) => {
+    setMindfulPopup(null);
+    const today = new Date();
+    const currKey = `${today.getFullYear()}-${today.getMonth()}`;
+    try {
+      localStorage.setItem(`lastMindfulReportMonth_${userId}`, currKey);
+      if (optOut) localStorage.setItem(`mindfulReportOptOut_${userId}`, "1");
+    } catch {}
+    if (optOut) saveMindfulPrefs({ autoMonthlyPopup: false });
+  }, [userId, saveMindfulPrefs]);
+
+  const markMindfulSig = useCallback((sig, type) => {
+    const key = type === "essential" ? "essentialSigs" : "avoidableSigs";
+    const otherKey = type === "essential" ? "avoidableSigs" : "essentialSigs";
+    const current = mindfulPrefsRef.current;
+    saveMindfulPrefs({
+      [key]: [...new Set([...(current[key] || []), sig])],
+      [otherKey]: (current[otherKey] || []).filter(s => s !== sig),
+    });
+  }, [saveMindfulPrefs]);
 
   // ── Computed ──────────────────────────────────────────────────────────────
   const getTAct = useCallback((t) => {
@@ -750,37 +971,46 @@ ${breakdownHtml}
   }, [editBanks, userId, sToast]);
 
   // ── Insights ──────────────────────────────────────────────────────────────
-  const insPeriodLabel = useMemo(() => {
-    if (insPeriod === "all") return "All Time";
-    if (insPeriod === "year") return insYear.toString();
-    return new Date(insMonth.year, insMonth.month, 1).toLocaleDateString("en-IN", { month: "long", year: "numeric" });
-  }, [insMonth, insYear, insPeriod]);
+  const insAsPeriod = useMemo(() => insPeriod === "all"
+    ? { scope: "all" }
+    : insPeriod === "year"
+      ? { scope: "year", year: insYear }
+      : { scope: "month", year: insMonth.year, month: insMonth.month },
+  [insPeriod, insMonth, insYear]);
+
+  const insPeriodLabel = useMemo(() => periodLabel(insAsPeriod), [insAsPeriod]);
 
   const ins = useMemo(() => {
-    // Check for trip expenses in the current period (unaffected by insExTrips toggle)
-    const inPeriod = (e) => {
-      if (insPeriod === "all") return true;
-      const d = new Date(e.date);
-      if (insPeriod === "year") return d.getFullYear() === insYear;
-      return d.getMonth() === insMonth.month && d.getFullYear() === insMonth.year;
-    };
-    const hasTripInPeriod = exps.some(e => e.tripId && e.category !== "investment" && inPeriod(e));
+    const hasTripInPeriod = exps.some(e => e.tripId && e.category !== "investment" && inPeriodFor(e, insAsPeriod));
     const tm = exps.filter(e => {
       if (e.category === "investment") return false;
       if (insExTrips && e.tripId) return false;
-      return inPeriod(e);
+      return inPeriodFor(e, insAsPeriod);
     });
     const bc = {}, bp = {};
     tm.forEach(e => { const k = e.tripId ? `trip_${e.tripId}` : e.category; bc[k] = (bc[k] || 0) + e.amount; bp[e.payMode] = (bp[e.payMode] || 0) + e.amount; });
     const totM = tm.reduce((s, e) => s + e.amount, 0);
-    const savFilter = insPeriod === "year"
-      ? e => e.category === "investment" && !e.tripId && new Date(e.date).getFullYear() === insYear
-      : insPeriod === "month"
-        ? e => e.category === "investment" && !e.tripId && new Date(e.date).getMonth() === insMonth.month && new Date(e.date).getFullYear() === insMonth.year
-        : e => e.category === "investment" && !e.tripId;
-    const totI = exps.filter(savFilter).reduce((s, e) => s + e.amount, 0);
+    const totI = exps.filter(e =>
+      e.category === "investment" && !e.tripId && inPeriodFor(e, insAsPeriod)
+    ).reduce((s, e) => s + e.amount, 0);
     return { bc, bp, totM, totI, mc: tm.length, hasTripInPeriod };
-  }, [exps, insMonth, insYear, insPeriod, insExTrips]);
+  }, [exps, insAsPeriod, insExTrips]);
+
+  // 6-month history scans are independent of the selected period — memoize separately
+  // so switching period tabs doesn't trigger a full rescan.
+  const mindfulHistory = useMemo(() => {
+    const refDate = new Date();
+    return {
+      eligible: checkMindfulEligibility(exps, refDate).eligible,
+      learnedEssentials: learnEssentialSigs(exps, refDate),
+      baselines: computeBaselines(exps, refDate),
+    };
+  }, [exps]);
+
+  const mindfulReport = useMemo(() => {
+    if (!mindfulHistory.eligible) return null;
+    return buildMindfulReport(exps, insAsPeriod, trips, mindfulPrefs, mindfulHistory);
+  }, [mindfulHistory, exps, trips, mindfulPrefs, insAsPeriod]);
 
   // Yearly bar chart data: monthly breakdown for the selected year
   const yearlyBars = useMemo(() => {
@@ -1150,6 +1380,92 @@ ${breakdownHtml}
                 <div style={{ width: 18, height: 18, borderRadius: 5, border: `2px solid ${insExTrips ? "#4A90D9" : G.bdr}`, background: insExTrips ? "#4A90D9" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#FFF", fontWeight: 700, flexShrink: 0 }}>{insExTrips ? "✓" : ""}</div>
                 <span style={{ fontSize: 14, fontWeight: 600, color: insExTrips ? "#4A90D9" : G.t2 }}>Exclude trips</span>
                 <span style={{ fontSize: 12, color: G.tm, marginLeft: "auto" }}>high-value single categories</span>
+              </div>
+            )}
+
+            {/* Mindful Insights card — only for eligible users */}
+            {mindfulReport && mindfulReport.periodEntryCount > 0 && (
+              <div style={{ marginBottom: 18, background: G.bg2, borderRadius: 14, padding: "16px 14px", border: `1px solid ${G.bdr}` }}>
+                <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 14 }}>Mindful — {mindfulReport.scopeLabel}</div>
+
+                {/* Essential vs Discretionary bar */}
+                <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 11, color: G.t3, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.8 }}>Essential</div>
+                    <div style={{ fontSize: 18, fontWeight: 800, color: "#34C759" }}>{formatINR(mindfulReport.essentialSpend)}</div>
+                    <div style={{ fontSize: 12, color: G.tm }}>{Math.round((1 - mindfulReport.discretionaryPct) * 100)}%</div>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 11, color: G.t3, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.8 }}>Discretionary</div>
+                    <div style={{ fontSize: 18, fontWeight: 800, color: "#FF9500" }}>{formatINR(mindfulReport.discretionarySpend)}</div>
+                    <div style={{ fontSize: 12, color: G.tm }}>{Math.round(mindfulReport.discretionaryPct * 100)}%</div>
+                  </div>
+                </div>
+                {/* Stacked bar */}
+                <div style={{ height: 8, borderRadius: 4, background: G.bg3, overflow: "hidden", display: "flex", marginBottom: 16 }}>
+                  <div style={{ width: `${Math.round((1 - mindfulReport.discretionaryPct) * 100)}%`, background: "#34C759", borderRadius: "4px 0 0 4px", transition: "width .4s" }} />
+                  <div style={{ flex: 1, background: "#FF9500", borderRadius: "0 4px 4px 0" }} />
+                </div>
+
+                {/* Top avoidable items */}
+                {mindfulReport.topAvoidable.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 12, color: G.t3, marginBottom: 8, fontWeight: 600 }}>
+                      Top {mindfulReport.topAvoidable.length} item{mindfulReport.topAvoidable.length > 1 ? "s" : ""} = {Math.round(mindfulReport.topAvoidablePctOfDisc * 100)}% of discretionary
+                    </div>
+                    {mindfulReport.topAvoidable.map((e, i) => {
+                      const catObj = e.category === "uncategorized" ? UNCAT : (allCats.find(c => c.id === e.category) || { label: e.category, icon: "?" });
+                      const d = new Date(e.date);
+                      const isWe = d.getDay() === 0 || d.getDay() === 6;
+                      const baseAvg = isWe
+                        ? (mindfulReport.baselines?.weekendAvgByCat?.[e.category] || 0)
+                        : (mindfulReport.baselines?.weekdayAvgByCat?.[e.category] || 0);
+                      const ratio = baseAvg > 0 ? (e.amount / baseAvg) : 0;
+                      const dayLabel = d.toLocaleDateString("en-IN", { weekday: "short" });
+                      const hr = d.getHours();
+                      const timeLabel = hr < 12 ? "morning" : hr < 17 ? "afternoon" : "evening";
+                      return (
+                        <div key={e.id} style={{ padding: "10px 0", borderTop: i > 0 ? `1px solid ${G.bg3}` : "none" }}>
+                          <div onClick={() => setDetMod(e)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 14, fontWeight: 700, color: G.t1 }}>{formatINR(e.amount)}<span style={{ fontWeight: 400, color: G.t2, marginLeft: 8, fontSize: 13 }}>{e.note || "—"}</span></div>
+                              <div style={{ fontSize: 11, color: G.tm, marginTop: 2 }}>
+                                {catObj.icon} {catObj.label} · {dayLabel} {timeLabel}
+                                {ratio >= 1.5 && <span style={{ color: "#FF9500", fontWeight: 600 }}> · {ratio.toFixed(1)}× {isWe ? "wkend" : "wkday"} avg</span>}
+                              </div>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                            <button onClick={() => { hap(); markMindfulSig(e.sig, "essential"); sToast("Marked essential"); }}
+                              style={{ padding: "4px 10px", borderRadius: 6, border: `1px solid ${G.bdr}`, background: G.bg, fontSize: 11, fontWeight: 600, color: "#34C759", cursor: "pointer" }}>Essential</button>
+                            <button onClick={() => { hap(); markMindfulSig(e.sig, "avoidable"); sToast("Noted — we'll keep flagging"); }}
+                              style={{ padding: "4px 10px", borderRadius: 6, border: `1px solid ${G.bdr}`, background: G.bg, fontSize: 11, fontWeight: 600, color: "#FF9500", cursor: "pointer" }}>✓ Avoidable</button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+
+                {/* Trip summary */}
+                {mindfulReport.trips.length > 0 && (
+                  <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${G.bg3}` }}>
+                    <div style={{ fontSize: 12, color: G.t3, fontWeight: 600, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>Trips (shown separately)</div>
+                    {mindfulReport.trips.map(t => (
+                      <div key={t.tripId} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 4 }}>
+                        <span>✈️ {t.name}</span>
+                        <span style={{ fontWeight: 700 }}>{formatINR(t.spend)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Monthly popup toggle */}
+                <div onClick={() => { hap(); saveMindfulPrefs({ autoMonthlyPopup: !mindfulPrefs.autoMonthlyPopup }); }}
+                  style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 14, paddingTop: 10, borderTop: `1px solid ${G.bg3}`, cursor: "pointer" }}>
+                  <div style={{ width: 16, height: 16, borderRadius: 4, border: `2px solid ${mindfulPrefs.autoMonthlyPopup ? "#007AFF" : G.bdr}`, background: mindfulPrefs.autoMonthlyPopup ? "#007AFF" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: "#FFF", fontWeight: 700, flexShrink: 0 }}>{mindfulPrefs.autoMonthlyPopup ? "✓" : ""}</div>
+                  <span style={{ fontSize: 12, color: G.t3 }}>Pop this up at the start of each month</span>
+                </div>
               </div>
             )}
 
@@ -1625,6 +1941,78 @@ ${breakdownHtml}
               <button onClick={() => setBankMod(false)} style={{ padding: "12px 18px", borderRadius: 12, border: `2px solid ${G.bdr}`, background: G.bg, color: G.t3, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
               <button onClick={saveBanks} disabled={bankSaving} style={{ flex: 1, padding: "12px", borderRadius: 12, border: "none", background: G.bk, color: G.wh, fontSize: 16, fontWeight: 700, cursor: "pointer" }}>{bankSaving ? "Saving\u2026" : "Save"}</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════ MINDFUL POPUP MODAL ══════ */}
+      {mindfulPopup && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 999 }} onClick={() => dismissMindfulPopup()}>
+          <div style={{ width: "100%", maxWidth: 390, background: G.bg, borderRadius: "20px 20px 0 0", padding: "24px 20px 40px", maxHeight: "85vh", overflowY: "auto" }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+              <div style={{ width: 30 }} />
+              <div style={{ width: 36, height: 4, borderRadius: 2, background: G.lt }} />
+              <button onClick={() => dismissMindfulPopup()} style={{ background: "none", border: "none", fontSize: 20, color: G.t3, cursor: "pointer", padding: "2px 6px", lineHeight: 1 }}>{"\u2715"}</button>
+            </div>
+            <div style={{ textAlign: "center", marginBottom: 20 }}>
+              <div style={{ fontSize: 20, fontWeight: 800 }}>Mindful — {mindfulPopup.scopeLabel}</div>
+              <div style={{ fontSize: 14, color: G.t3, marginTop: 4 }}>A look at last month's spending</div>
+            </div>
+
+            {/* Summary row */}
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              <div style={{ flex: 1, textAlign: "center", background: G.bg2, borderRadius: 12, padding: "10px 6px" }}>
+                <div style={{ fontSize: 18, fontWeight: 800, color: G.t1 }}>{formatINR(mindfulPopup.totalSpend)}</div>
+                <div style={{ fontSize: 10, color: G.t3, marginTop: 2 }}>Total</div>
+              </div>
+              <div style={{ flex: 1, textAlign: "center", background: G.bg2, borderRadius: 12, padding: "10px 6px" }}>
+                <div style={{ fontSize: 18, fontWeight: 800, color: "#34C759" }}>{Math.round((1 - mindfulPopup.discretionaryPct) * 100)}%</div>
+                <div style={{ fontSize: 10, color: G.t3, marginTop: 2 }}>Essential</div>
+              </div>
+              <div style={{ flex: 1, textAlign: "center", background: G.bg2, borderRadius: 12, padding: "10px 6px" }}>
+                <div style={{ fontSize: 18, fontWeight: 800, color: "#FF9500" }}>{Math.round(mindfulPopup.discretionaryPct * 100)}%</div>
+                <div style={{ fontSize: 10, color: G.t3, marginTop: 2 }}>Discretionary</div>
+              </div>
+            </div>
+
+            {/* Top avoidable (compact, max 3) */}
+            {mindfulPopup.topAvoidable.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 12, color: G.t3, fontWeight: 600, marginBottom: 8 }}>
+                  Top avoidable — {Math.round(mindfulPopup.topAvoidablePctOfDisc * 100)}% of discretionary
+                </div>
+                {mindfulPopup.topAvoidable.slice(0, 3).map((e, i) => {
+                  const catObj = e.category === "uncategorized" ? UNCAT : (allCats.find(c => c.id === e.category) || { label: e.category, icon: "?" });
+                  return (
+                    <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderTop: i > 0 ? `1px solid ${G.bg3}` : "none" }}>
+                      <span style={{ fontSize: 14, color: G.t2 }}>{e.note || "—"} <span style={{ fontSize: 12, color: G.tm }}>· {catObj.label}</span></span>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: G.t1 }}>{formatINR(e.amount)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Trip summary (compact) */}
+            {mindfulPopup.trips.length > 0 && (
+              <div style={{ marginBottom: 16, paddingTop: 8, borderTop: `1px solid ${G.bg3}` }}>
+                <div style={{ fontSize: 12, color: G.t3, fontWeight: 600, marginBottom: 6 }}>Trips</div>
+                {mindfulPopup.trips.map(t => (
+                  <div key={t.tripId} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 3 }}>
+                    <span>✈️ {t.name}</span><span style={{ fontWeight: 700 }}>{formatINR(t.spend)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <button onClick={() => { dismissMindfulPopup(); setView("insights"); }}
+              style={{ width: "100%", padding: 14, borderRadius: 14, border: "none", background: G.bk, color: G.wh, fontSize: 16, fontWeight: 700, cursor: "pointer", marginBottom: 10 }}>
+              See Full Report
+            </button>
+            <button onClick={() => dismissMindfulPopup(true)}
+              style={{ width: "100%", padding: 10, borderRadius: 10, border: "none", background: "transparent", fontSize: 13, color: G.tm, cursor: "pointer" }}>
+              Don't show again
+            </button>
           </div>
         </div>
       )}
