@@ -1384,61 +1384,54 @@ ${breakdownHtml}
 
             {/* Mindful Insights card — only for eligible users */}
             {mindfulReport && mindfulReport.periodEntryCount > 0 && (
-              <div style={{ marginBottom: 18, background: G.bg2, borderRadius: 14, padding: "16px 14px", border: `1px solid ${G.bdr}` }}>
-                <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 14 }}>Mindful — {mindfulReport.scopeLabel}</div>
+              <div style={{ marginBottom: 18, background: G.bg2, borderRadius: 14, padding: "14px 14px 12px", border: `1px solid ${G.bdr}` }}>
+                <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 2 }}>Where you can save</div>
+                <div style={{ fontSize: 11, color: G.tm, marginBottom: 12 }}>{mindfulReport.scopeLabel}</div>
 
                 {/* Essential vs Discretionary bar */}
-                <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+                <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 11, color: G.t3, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.8 }}>Essential</div>
-                    <div style={{ fontSize: 18, fontWeight: 800, color: "#34C759" }}>{formatINR(mindfulReport.essentialSpend)}</div>
-                    <div style={{ fontSize: 12, color: G.tm }}>{Math.round((1 - mindfulReport.discretionaryPct) * 100)}%</div>
+                    <div style={{ fontSize: 10, color: G.t3, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.6 }}>Essential</div>
+                    <div style={{ fontSize: 16, fontWeight: 800, color: "#34C759" }}>{formatINR(mindfulReport.essentialSpend)} <span style={{ fontSize: 11, color: G.tm, fontWeight: 500 }}>{Math.round((1 - mindfulReport.discretionaryPct) * 100)}%</span></div>
                   </div>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 11, color: G.t3, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.8 }}>Discretionary</div>
-                    <div style={{ fontSize: 18, fontWeight: 800, color: "#FF9500" }}>{formatINR(mindfulReport.discretionarySpend)}</div>
-                    <div style={{ fontSize: 12, color: G.tm }}>{Math.round(mindfulReport.discretionaryPct * 100)}%</div>
+                    <div style={{ fontSize: 10, color: G.t3, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.6 }}>Discretionary</div>
+                    <div style={{ fontSize: 16, fontWeight: 800, color: "#FF9500" }}>{formatINR(mindfulReport.discretionarySpend)} <span style={{ fontSize: 11, color: G.tm, fontWeight: 500 }}>{Math.round(mindfulReport.discretionaryPct * 100)}%</span></div>
                   </div>
                 </div>
                 {/* Stacked bar */}
-                <div style={{ height: 8, borderRadius: 4, background: G.bg3, overflow: "hidden", display: "flex", marginBottom: 16 }}>
-                  <div style={{ width: `${Math.round((1 - mindfulReport.discretionaryPct) * 100)}%`, background: "#34C759", borderRadius: "4px 0 0 4px", transition: "width .4s" }} />
-                  <div style={{ flex: 1, background: "#FF9500", borderRadius: "0 4px 4px 0" }} />
+                <div style={{ height: 6, borderRadius: 3, background: G.bg3, overflow: "hidden", display: "flex", marginBottom: 14 }}>
+                  <div style={{ width: `${Math.round((1 - mindfulReport.discretionaryPct) * 100)}%`, background: "#34C759", transition: "width .4s" }} />
+                  <div style={{ flex: 1, background: "#FF9500" }} />
                 </div>
 
                 {/* Top avoidable items */}
                 {mindfulReport.topAvoidable.length > 0 && (
                   <>
-                    <div style={{ fontSize: 12, color: G.t3, marginBottom: 8, fontWeight: 600 }}>
-                      Top {mindfulReport.topAvoidable.length} item{mindfulReport.topAvoidable.length > 1 ? "s" : ""} = {Math.round(mindfulReport.topAvoidablePctOfDisc * 100)}% of discretionary
+                    <div style={{ fontSize: 11, color: G.t3, marginBottom: 4, fontWeight: 600 }}>
+                      Top {mindfulReport.topAvoidable.length} = {Math.round(mindfulReport.topAvoidablePctOfDisc * 100)}% of discretionary
                     </div>
                     {mindfulReport.topAvoidable.map((e, i) => {
                       const catObj = e.category === "uncategorized" ? UNCAT : (allCats.find(c => c.id === e.category) || { label: e.category, icon: "?" });
                       const d = new Date(e.date);
-                      const isWe = d.getDay() === 0 || d.getDay() === 6;
-                      const baseAvg = isWe
-                        ? (mindfulReport.baselines?.weekendAvgByCat?.[e.category] || 0)
-                        : (mindfulReport.baselines?.weekdayAvgByCat?.[e.category] || 0);
-                      const ratio = baseAvg > 0 ? (e.amount / baseAvg) : 0;
                       const dayLabel = d.toLocaleDateString("en-IN", { weekday: "short" });
-                      const hr = d.getHours();
-                      const timeLabel = hr < 12 ? "morning" : hr < 17 ? "afternoon" : "evening";
                       return (
-                        <div key={e.id} style={{ padding: "10px 0", borderTop: i > 0 ? `1px solid ${G.bg3}` : "none" }}>
-                          <div onClick={() => setDetMod(e)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontSize: 14, fontWeight: 700, color: G.t1 }}>{formatINR(e.amount)}<span style={{ fontWeight: 400, color: G.t2, marginLeft: 8, fontSize: 13 }}>{e.note || "—"}</span></div>
-                              <div style={{ fontSize: 11, color: G.tm, marginTop: 2 }}>
-                                {catObj.icon} {catObj.label} · {dayLabel} {timeLabel}
-                                {ratio >= 1.5 && <span style={{ color: "#FF9500", fontWeight: 600 }}> · {ratio.toFixed(1)}× {isWe ? "wkend" : "wkday"} avg</span>}
-                              </div>
+                        <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderTop: i > 0 ? `1px solid ${G.bg3}` : "none" }}>
+                          <div onClick={() => setDetMod(e)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: G.t1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {formatINR(e.amount)}<span style={{ fontWeight: 400, color: G.t2, marginLeft: 6, fontSize: 12 }}>{e.note || "—"}</span>
+                            </div>
+                            <div style={{ fontSize: 10, color: G.tm, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", ...gujStyle(catObj.label, 10) }}>
+                              {catObj.icon} {catObj.label} · {dayLabel}
                             </div>
                           </div>
-                          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                          <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
                             <button onClick={() => { hap(); markMindfulSig(e.sig, "essential"); sToast("Marked essential"); }}
-                              style={{ padding: "4px 10px", borderRadius: 6, border: `1px solid ${G.bdr}`, background: G.bg, fontSize: 11, fontWeight: 600, color: "#34C759", cursor: "pointer" }}>Essential</button>
+                              title="Mark essential"
+                              style={{ width: 28, height: 28, borderRadius: "50%", border: `1px solid #34C75955`, background: "transparent", fontSize: 14, fontWeight: 700, color: "#34C759", cursor: "pointer", padding: 0, lineHeight: 1 }}>✓</button>
                             <button onClick={() => { hap(); markMindfulSig(e.sig, "avoidable"); sToast("Noted — we'll keep flagging"); }}
-                              style={{ padding: "4px 10px", borderRadius: 6, border: `1px solid ${G.bdr}`, background: G.bg, fontSize: 11, fontWeight: 600, color: "#FF9500", cursor: "pointer" }}>✓ Avoidable</button>
+                              title="Confirm avoidable"
+                              style={{ width: 28, height: 28, borderRadius: "50%", border: `1px solid #FF950055`, background: "transparent", fontSize: 14, fontWeight: 700, color: "#FF9500", cursor: "pointer", padding: 0, lineHeight: 1 }}>!</button>
                           </div>
                         </div>
                       );
@@ -1448,10 +1441,10 @@ ${breakdownHtml}
 
                 {/* Trip summary */}
                 {mindfulReport.trips.length > 0 && (
-                  <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${G.bg3}` }}>
-                    <div style={{ fontSize: 12, color: G.t3, fontWeight: 600, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>Trips (shown separately)</div>
+                  <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${G.bg3}` }}>
+                    <div style={{ fontSize: 10, color: G.t3, fontWeight: 600, marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.6 }}>Trips (separate)</div>
                     {mindfulReport.trips.map(t => (
-                      <div key={t.tripId} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 4 }}>
+                      <div key={t.tripId} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 2 }}>
                         <span>✈️ {t.name}</span>
                         <span style={{ fontWeight: 700 }}>{formatINR(t.spend)}</span>
                       </div>
@@ -1461,9 +1454,9 @@ ${breakdownHtml}
 
                 {/* Monthly popup toggle */}
                 <div onClick={() => { hap(); saveMindfulPrefs({ autoMonthlyPopup: !mindfulPrefs.autoMonthlyPopup }); }}
-                  style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 14, paddingTop: 10, borderTop: `1px solid ${G.bg3}`, cursor: "pointer" }}>
-                  <div style={{ width: 16, height: 16, borderRadius: 4, border: `2px solid ${mindfulPrefs.autoMonthlyPopup ? "#007AFF" : G.bdr}`, background: mindfulPrefs.autoMonthlyPopup ? "#007AFF" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: "#FFF", fontWeight: 700, flexShrink: 0 }}>{mindfulPrefs.autoMonthlyPopup ? "✓" : ""}</div>
-                  <span style={{ fontSize: 12, color: G.t3 }}>Pop this up at the start of each month</span>
+                  style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, paddingTop: 8, borderTop: `1px solid ${G.bg3}`, cursor: "pointer" }}>
+                  <div style={{ width: 14, height: 14, borderRadius: 3, border: `2px solid ${mindfulPrefs.autoMonthlyPopup ? "#007AFF" : G.bdr}`, background: mindfulPrefs.autoMonthlyPopup ? "#007AFF" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, color: "#FFF", fontWeight: 700, flexShrink: 0 }}>{mindfulPrefs.autoMonthlyPopup ? "✓" : ""}</div>
+                  <span style={{ fontSize: 11, color: G.tm }}>Pop this up each month</span>
                 </div>
               </div>
             )}
@@ -1954,8 +1947,8 @@ ${breakdownHtml}
               <button onClick={() => dismissMindfulPopup()} style={{ background: "none", border: "none", fontSize: 20, color: G.t3, cursor: "pointer", padding: "2px 6px", lineHeight: 1 }}>{"\u2715"}</button>
             </div>
             <div style={{ textAlign: "center", marginBottom: 20 }}>
-              <div style={{ fontSize: 20, fontWeight: 800 }}>Mindful — {mindfulPopup.scopeLabel}</div>
-              <div style={{ fontSize: 14, color: G.t3, marginTop: 4 }}>A look at last month's spending</div>
+              <div style={{ fontSize: 20, fontWeight: 800 }}>Where you can save</div>
+              <div style={{ fontSize: 13, color: G.t3, marginTop: 4 }}>{mindfulPopup.scopeLabel} · a look at last month</div>
             </div>
 
             {/* Summary row */}
