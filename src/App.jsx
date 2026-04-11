@@ -279,7 +279,7 @@ export default function ExpenseTracker() {
   const [delConfirm, setDelConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [onboardStep, setOnboardStep] = useState(null); // null = hidden, 0-2 = step index
-  const [mindfulPrefs, setMindfulPrefs] = useState({ essentialSigs: [], avoidableSigs: [], reviewedScopes: [], autoMonthlyPopup: true });
+  const [mindfulPrefs, setMindfulPrefs] = useState({ essentialSigs: [], avoidableSigs: [], reviewedScopes: [], autoMonthlyPopup: true, forceEnabled: false });
   const [mindfulPopup, setMindfulPopup] = useState(null);
   const [mindfulOverrides, setMindfulOverrides] = useState({}); // { [scopeKey]: boolean } — per-session expansion override
   const [insCatExpanded, setInsCatExpanded] = useState(false);
@@ -297,7 +297,7 @@ export default function ExpenseTracker() {
     setCats(OLD_DEFAULT_CATEGORIES); setUserKey(null); setEditId(null);
     setAmt(""); setNote(""); setCat("personal"); setPay("cash");
     setMindfulPopup(null); setMindfulOverrides({}); setInsCatExpanded(false);
-    setMindfulPrefs({ essentialSigs: [], avoidableSigs: [], reviewedScopes: [], autoMonthlyPopup: true });
+    setMindfulPrefs({ essentialSigs: [], avoidableSigs: [], reviewedScopes: [], autoMonthlyPopup: true, forceEnabled: false });
   }, [userId]);
 
   // ── Load data + realtime ──────────────────────────────────────────────────
@@ -358,6 +358,7 @@ export default function ExpenseTracker() {
         avoidableSigs: parsedMindful.avoidableSigs || [],
         reviewedScopes: parsedMindful.reviewedScopes || [],
         autoMonthlyPopup: parsedMindful.autoMonthlyPopup !== false,
+        forceEnabled: parsedMindful.forceEnabled === true,
       };
       setMindfulPrefs(mPrefs);
 
@@ -370,7 +371,7 @@ export default function ExpenseTracker() {
           const lastShown = localStorage.getItem(`lastMindfulReportMonth_${userId}`);
           if (lastShown !== currKey) {
             const { eligible, targetMonth } = checkMindfulEligibility(mappedExps, today);
-            if (eligible) {
+            if (eligible || mPrefs.forceEnabled === true) {
               mindfulPopupTimer = setTimeout(() => {
                 if (cancelled) return;
                 const report = buildMindfulReport(mappedExps, { scope: "month", ...targetMonth }, mappedTrips, mPrefs);
@@ -1026,11 +1027,11 @@ ${breakdownHtml}
   const mindfulHistory = useMemo(() => {
     const refDate = new Date();
     return {
-      eligible: checkMindfulEligibility(exps, refDate).eligible,
+      eligible: checkMindfulEligibility(exps, refDate).eligible || mindfulPrefs.forceEnabled === true,
       learnedEssentials: learnEssentialSigs(exps, refDate),
       baselines: computeBaselines(exps, refDate),
     };
-  }, [exps]);
+  }, [exps, mindfulPrefs.forceEnabled]);
 
   const mindfulReport = useMemo(() => {
     if (!mindfulHistory.eligible) return null;
@@ -1498,12 +1499,6 @@ ${breakdownHtml}
                   </div>
                 )}
 
-                {/* Monthly popup toggle */}
-                <div onClick={() => { hap(); saveMindfulPrefs({ autoMonthlyPopup: !mindfulPrefs.autoMonthlyPopup }); }}
-                  style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, paddingTop: 8, borderTop: `1px solid ${G.bg3}`, cursor: "pointer" }}>
-                  <div style={{ width: 14, height: 14, borderRadius: 3, border: `2px solid ${mindfulPrefs.autoMonthlyPopup ? "#007AFF" : G.bdr}`, background: mindfulPrefs.autoMonthlyPopup ? "#007AFF" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, color: "#FFF", fontWeight: 700, flexShrink: 0 }}>{mindfulPrefs.autoMonthlyPopup ? "✓" : ""}</div>
-                  <span style={{ fontSize: 11, color: G.tm }}>Pop this up each month</span>
-                </div>
               </div>
             )}
 
@@ -2096,6 +2091,23 @@ ${breakdownHtml}
             </div>
 
             <div style={{ borderTop: `1px solid ${G.lt}`, paddingTop: 16, marginBottom: 16 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: G.t3, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>Preferences</div>
+              <div onClick={() => { hap(); saveMindfulPrefs({ forceEnabled: !mindfulPrefs.forceEnabled }); }}
+                style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "12px 14px", borderRadius: 10, background: G.bg2, cursor: "pointer", marginBottom: 8 }}>
+                <div style={{ width: 18, height: 18, borderRadius: 5, border: `2px solid ${mindfulPrefs.forceEnabled ? "#007AFF" : G.bdr}`, background: mindfulPrefs.forceEnabled ? "#007AFF" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#FFF", fontWeight: 700, flexShrink: 0, marginTop: 1 }}>{mindfulPrefs.forceEnabled ? "✓" : ""}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: G.t1 }}>Always show Smart Spends</div>
+                  <div style={{ fontSize: 11, color: G.tm, marginTop: 2, lineHeight: 1.4 }}>Show the spending insights card on the Insights tab even if you don't have 3 months × 10+ entries yet.</div>
+                </div>
+              </div>
+              <div onClick={() => { hap(); saveMindfulPrefs({ autoMonthlyPopup: !mindfulPrefs.autoMonthlyPopup }); }}
+                style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "12px 14px", borderRadius: 10, background: G.bg2, cursor: "pointer", marginBottom: 12 }}>
+                <div style={{ width: 18, height: 18, borderRadius: 5, border: `2px solid ${mindfulPrefs.autoMonthlyPopup ? "#007AFF" : G.bdr}`, background: mindfulPrefs.autoMonthlyPopup ? "#007AFF" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#FFF", fontWeight: 700, flexShrink: 0, marginTop: 1 }}>{mindfulPrefs.autoMonthlyPopup ? "✓" : ""}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: G.t1 }}>Monthly Smart Spends popup</div>
+                  <div style={{ fontSize: 11, color: G.tm, marginTop: 2, lineHeight: 1.4 }}>Automatically show last month's summary on your first app open of each new month.</div>
+                </div>
+              </div>
               <button onClick={async () => {
                 const email = session?.user?.email;
                 if (!email) return;
