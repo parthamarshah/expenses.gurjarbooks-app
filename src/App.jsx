@@ -281,7 +281,8 @@ export default function ExpenseTracker() {
   const [onboardStep, setOnboardStep] = useState(null); // null = hidden, 0-2 = step index
   const [mindfulPrefs, setMindfulPrefs] = useState({ essentialSigs: [], avoidableSigs: [], reviewedScopes: [], autoMonthlyPopup: true });
   const [mindfulPopup, setMindfulPopup] = useState(null);
-  const [mindfulExpanded, setMindfulExpanded] = useState(false);
+  const [mindfulOverrides, setMindfulOverrides] = useState({}); // { [scopeKey]: boolean } — per-session expansion override
+  const [insCatExpanded, setInsCatExpanded] = useState(false);
 
   const aRef = useRef(null);
   const tRef = useRef({});
@@ -295,7 +296,7 @@ export default function ExpenseTracker() {
     setView("list"); setDbReady(false); setExps([]); setTrips([]); setBanks([]);
     setCats(OLD_DEFAULT_CATEGORIES); setUserKey(null); setEditId(null);
     setAmt(""); setNote(""); setCat("personal"); setPay("cash");
-    setMindfulPopup(null); setMindfulExpanded(false);
+    setMindfulPopup(null); setMindfulOverrides({}); setInsCatExpanded(false);
     setMindfulPrefs({ essentialSigs: [], avoidableSigs: [], reviewedScopes: [], autoMonthlyPopup: true });
   }, [userId]);
 
@@ -1001,10 +1002,8 @@ ${breakdownHtml}
       : `month-${insAsPeriod.year}-${insAsPeriod.month}`,
   [insAsPeriod]);
 
-  useEffect(() => { setMindfulExpanded(false); }, [mindfulScopeKey]);
-
   const isMindfulReviewed = (mindfulPrefs.reviewedScopes || []).includes(mindfulScopeKey);
-  const showMindfulDetails = !isMindfulReviewed || mindfulExpanded;
+  const mindfulExpanded = mindfulOverrides[mindfulScopeKey] ?? !isMindfulReviewed;
 
   const ins = useMemo(() => {
     const hasTripInPeriod = exps.some(e => e.tripId && e.category !== "investment" && inPeriodFor(e, insAsPeriod));
@@ -1385,17 +1384,21 @@ ${breakdownHtml}
               ) : <div style={{ width: 36 }} />}
             </div>
 
-            <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
-              <div style={{ flex: 1, borderRadius: 14, padding: "14px 14px", background: G.bk, color: G.wh }}>
-                <div style={{ fontSize: 10, fontWeight: 700, color: "#888", letterSpacing: 1, textTransform: "uppercase" }}>{insPeriod === "all" ? "All Time" : "Expenses"}</div>
-                <div style={{ fontSize: 22, fontWeight: 800, marginTop: 5, letterSpacing: -.5 }}>{formatINR(ins.totM)}</div>
-                <div style={{ fontSize: 12, color: "#666", marginTop: 3 }}>{ins.mc} entries</div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+              <div style={{ flex: 1, borderRadius: 14, padding: "10px 13px", background: G.bk, color: G.wh }}>
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 6 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "#888", letterSpacing: 1, textTransform: "uppercase" }}>{insPeriod === "all" ? "All Time" : "Expenses"}</div>
+                  <div style={{ fontSize: 10, color: "#666" }}>{ins.mc} entries</div>
+                </div>
+                <div style={{ fontSize: 21, fontWeight: 800, marginTop: 2, letterSpacing: -.5 }}>{formatINR(ins.totM)}</div>
               </div>
               {!cats.find(c => c.id === "investment")?.hidden && (
-              <div style={{ flex: 1, borderRadius: 14, padding: "14px 14px", background: G.bg2, border: `1.5px solid ${G.bdr}` }}>
-                <div style={{ fontSize: 10, fontWeight: 700, color: G.t3, letterSpacing: 1, textTransform: "uppercase" }}>Savings</div>
-                <div style={{ fontSize: 22, fontWeight: 800, marginTop: 5, letterSpacing: -.5 }}>{formatINR(ins.totI)}</div>
-                <div style={{ fontSize: 12, color: G.tm, marginTop: 3 }}>{insPeriod === "all" ? "all time" : insPeriod === "year" ? insYear : new Date(insMonth.year, insMonth.month).toLocaleDateString("en-IN", { month: "short" })}</div>
+              <div style={{ flex: 1, borderRadius: 14, padding: "10px 13px", background: G.bg2, border: `1.5px solid ${G.bdr}` }}>
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 6 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: G.t3, letterSpacing: 1, textTransform: "uppercase" }}>Savings</div>
+                  <div style={{ fontSize: 10, color: G.tm }}>{insPeriod === "all" ? "all time" : insPeriod === "year" ? insYear : new Date(insMonth.year, insMonth.month).toLocaleDateString("en-IN", { month: "short" })}</div>
+                </div>
+                <div style={{ fontSize: 21, fontWeight: 800, marginTop: 2, letterSpacing: -.5 }}>{formatINR(ins.totI)}</div>
               </div>
               )}
             </div>
@@ -1412,8 +1415,10 @@ ${breakdownHtml}
             {/* Mindful Insights card — only for eligible users */}
             {mindfulReport && mindfulReport.periodEntryCount > 0 && (
               <div style={{ marginBottom: 18, background: G.bg2, borderRadius: 14, padding: "14px 14px 12px", border: `1px solid ${G.bdr}` }}>
-                <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 2 }}>Where you can save</div>
-                <div style={{ fontSize: 11, color: G.tm, marginBottom: 12 }}>{mindfulReport.scopeLabel}</div>
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 12 }}>
+                  <div style={{ fontSize: 15, fontWeight: 700 }}>Smart spends</div>
+                  <div style={{ fontSize: 11, color: G.tm }}>{mindfulReport.scopeLabel}</div>
+                </div>
 
                 {/* Essential vs Discretionary bar */}
                 <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
@@ -1433,13 +1438,13 @@ ${breakdownHtml}
                 </div>
 
                 {/* Top avoidable items — collapsible after first review */}
-                {mindfulReport.topAvoidable.length > 0 && !showMindfulDetails && (
-                  <button onClick={() => { hap(); setMindfulExpanded(true); }}
+                {mindfulReport.topAvoidable.length > 0 && !mindfulExpanded && (
+                  <button onClick={() => { hap(); setMindfulOverrides(o => ({ ...o, [mindfulScopeKey]: true })); }}
                     style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px dashed ${G.bdr}`, background: "transparent", fontSize: 12, fontWeight: 600, color: G.t3, cursor: "pointer" }}>
                     View top {mindfulReport.topAvoidable.length} avoidable · {Math.round(mindfulReport.topAvoidablePctOfDisc * 100)}% of discretionary →
                   </button>
                 )}
-                {mindfulReport.topAvoidable.length > 0 && showMindfulDetails && (
+                {mindfulReport.topAvoidable.length > 0 && mindfulExpanded && (
                   <>
                     <div style={{ fontSize: 11, color: G.t3, marginBottom: 4, fontWeight: 600 }}>
                       Top {mindfulReport.topAvoidable.length} = {Math.round(mindfulReport.topAvoidablePctOfDisc * 100)}% of discretionary
@@ -1448,6 +1453,8 @@ ${breakdownHtml}
                       const catObj = e.category === "uncategorized" ? UNCAT : (allCats.find(c => c.id === e.category) || { label: e.category, icon: "?" });
                       const d = new Date(e.date);
                       const dayLabel = d.toLocaleDateString("en-IN", { weekday: "short" });
+                      const markedEssential = (mindfulPrefs.essentialSigs || []).includes(e.sig);
+                      const markedAvoidable = (mindfulPrefs.avoidableSigs || []).includes(e.sig);
                       return (
                         <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderTop: i > 0 ? `1px solid ${G.bg3}` : "none" }}>
                           <div onClick={() => setDetMod(e)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
@@ -1456,20 +1463,22 @@ ${breakdownHtml}
                             </div>
                             <div style={{ fontSize: 10, color: G.tm, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", ...gujStyle(catObj.label, 10) }}>
                               {catObj.icon} {catObj.label} · {dayLabel}
+                              {markedAvoidable && <span style={{ color: "#FF9500", fontWeight: 600 }}> · flagged</span>}
+                              {markedEssential && <span style={{ color: "#34C759", fontWeight: 600 }}> · kept</span>}
                             </div>
                           </div>
                           <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-                            <button onClick={() => { hap(); markMindfulSig(e.sig, "essential"); markMindfulReviewed(mindfulScopeKey); sToast("Marked essential"); }}
+                            <button onClick={() => { hap(); markMindfulSig(e.sig, "essential"); markMindfulReviewed(mindfulScopeKey); setMindfulOverrides(o => ({ ...o, [mindfulScopeKey]: true })); sToast("Marked essential"); }}
                               title="Mark essential"
-                              style={{ width: 28, height: 28, borderRadius: "50%", border: `1px solid #34C75955`, background: "transparent", fontSize: 14, fontWeight: 700, color: "#34C759", cursor: "pointer", padding: 0, lineHeight: 1 }}>✓</button>
-                            <button onClick={() => { hap(); markMindfulSig(e.sig, "avoidable"); markMindfulReviewed(mindfulScopeKey); sToast("Noted — we'll keep flagging"); }}
+                              style={{ width: 28, height: 28, borderRadius: "50%", border: `1px solid ${markedEssential ? "#34C759" : "#34C75955"}`, background: markedEssential ? "#34C75922" : "transparent", fontSize: 14, fontWeight: 700, color: "#34C759", cursor: "pointer", padding: 0, lineHeight: 1 }}>✓</button>
+                            <button onClick={() => { hap(); markMindfulSig(e.sig, "avoidable"); markMindfulReviewed(mindfulScopeKey); setMindfulOverrides(o => ({ ...o, [mindfulScopeKey]: true })); sToast("Noted — we'll keep flagging"); }}
                               title="Confirm avoidable"
-                              style={{ width: 28, height: 28, borderRadius: "50%", border: `1px solid #FF950055`, background: "transparent", fontSize: 14, fontWeight: 700, color: "#FF9500", cursor: "pointer", padding: 0, lineHeight: 1 }}>!</button>
+                              style={{ width: 28, height: 28, borderRadius: "50%", border: `1px solid ${markedAvoidable ? "#FF9500" : "#FF950055"}`, background: markedAvoidable ? "#FF950022" : "transparent", fontSize: 14, fontWeight: 700, color: "#FF9500", cursor: "pointer", padding: 0, lineHeight: 1 }}>!</button>
                           </div>
                         </div>
                       );
                     })}
-                    <button onClick={() => { hap(); markMindfulReviewed(mindfulScopeKey); setMindfulExpanded(false); }}
+                    <button onClick={() => { hap(); markMindfulReviewed(mindfulScopeKey); setMindfulOverrides(o => ({ ...o, [mindfulScopeKey]: false })); }}
                       style={{ width: "100%", marginTop: 6, padding: "6px 10px", borderRadius: 8, border: "none", background: "transparent", fontSize: 11, color: G.tm, cursor: "pointer" }}>
                       Done reviewing · hide
                     </button>
@@ -1544,18 +1553,28 @@ ${breakdownHtml}
 
             <div style={{ marginBottom: 22 }}>
               <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>By Category <span style={{ fontSize: 12, color: G.tm, fontWeight: 400 }}>· tap to filter history</span></div>
-              {(() => { return Object.entries(ins.bc).sort((a, b) => b[1] - a[1]).map(([cid, a]) => {
-                const c = cid === "uncategorized" ? UNCAT : (allCats.find(x => x.id === cid) || cats[0]);
-                const p = ins.totM > 0 ? (a / ins.totM * 100) : 0;
-                const barCol = catColorMap[cid] || "#8E8E93";
-                return (
-                  <div key={cid} onClick={() => { hap(); setSelTrip(null); setFPay("all"); setSq(""); setFCat(cid); setHistPeriod(insPeriod); setHistMonth(insMonth); setHistYear(insYear); try { localStorage.setItem("histPeriod", insPeriod); localStorage.setItem("histMonth", JSON.stringify(insMonth)); localStorage.setItem("histYear", String(insYear)); } catch {} setSw({ id: null, dir: null }); setSwipeConf(null); setView("list"); }} style={{ marginBottom: 14, cursor: "pointer" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: G.t2, marginBottom: 5 }}><span style={gujStyle(c.label, 15)}>{c.icon} {c.label}</span><span style={{ fontWeight: 700, color: G.t1 }}>{formatINR(a)}</span></div>
-                    <div style={{ height: 7, background: G.bg3, borderRadius: 8, overflow: "hidden" }}><div style={{ height: 7, borderRadius: 8, background: barCol, width: `${p}%`, transition: "width .4s" }} /></div>
-                    <div style={{ fontSize: 12, color: G.tm, marginTop: 3, textAlign: "right" }}>{Math.round(p)}%</div>
-                  </div>
-                );
-              }); })()}
+              {(() => {
+                const all = Object.entries(ins.bc).sort((a, b) => b[1] - a[1]);
+                const visible = insCatExpanded ? all : all.slice(0, 3);
+                return visible.map(([cid, a]) => {
+                  const c = cid === "uncategorized" ? UNCAT : (allCats.find(x => x.id === cid) || cats[0]);
+                  const p = ins.totM > 0 ? (a / ins.totM * 100) : 0;
+                  const barCol = catColorMap[cid] || "#8E8E93";
+                  return (
+                    <div key={cid} onClick={() => { hap(); setSelTrip(null); setFPay("all"); setSq(""); setFCat(cid); setHistPeriod(insPeriod); setHistMonth(insMonth); setHistYear(insYear); try { localStorage.setItem("histPeriod", insPeriod); localStorage.setItem("histMonth", JSON.stringify(insMonth)); localStorage.setItem("histYear", String(insYear)); } catch {} setSw({ id: null, dir: null }); setSwipeConf(null); setView("list"); }} style={{ marginBottom: 14, cursor: "pointer" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, color: G.t2, marginBottom: 5 }}><span style={gujStyle(c.label, 15)}>{c.icon} {c.label}</span><span style={{ fontWeight: 700, color: G.t1 }}>{formatINR(a)}</span></div>
+                      <div style={{ height: 7, background: G.bg3, borderRadius: 8, overflow: "hidden" }}><div style={{ height: 7, borderRadius: 8, background: barCol, width: `${p}%`, transition: "width .4s" }} /></div>
+                      <div style={{ fontSize: 12, color: G.tm, marginTop: 3, textAlign: "right" }}>{Math.round(p)}%</div>
+                    </div>
+                  );
+                });
+              })()}
+              {Object.entries(ins.bc).length > 3 && (
+                <button onClick={() => { hap(); setInsCatExpanded(p => !p); }}
+                  style={{ width: "100%", padding: "8px 10px", borderRadius: 10, border: `1px dashed ${G.bdr}`, background: "transparent", fontSize: 12, fontWeight: 600, color: G.t3, cursor: "pointer", marginTop: 2 }}>
+                  {insCatExpanded ? "Show top 3 only" : `View all ${Object.entries(ins.bc).length} categories →`}
+                </button>
+              )}
               {Object.keys(ins.bc).length === 0 && <div style={{ color: G.tm, padding: "14px 0", fontSize: 15 }}>No data for this period</div>}
             </div>
 
