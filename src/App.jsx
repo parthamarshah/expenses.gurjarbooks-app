@@ -279,8 +279,9 @@ export default function ExpenseTracker() {
   const [delConfirm, setDelConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [onboardStep, setOnboardStep] = useState(null); // null = hidden, 0-2 = step index
-  const [mindfulPrefs, setMindfulPrefs] = useState({ essentialSigs: [], avoidableSigs: [], autoMonthlyPopup: true });
+  const [mindfulPrefs, setMindfulPrefs] = useState({ essentialSigs: [], avoidableSigs: [], reviewedScopes: [], autoMonthlyPopup: true });
   const [mindfulPopup, setMindfulPopup] = useState(null);
+  const [mindfulExpanded, setMindfulExpanded] = useState(false);
 
   const aRef = useRef(null);
   const tRef = useRef({});
@@ -294,7 +295,8 @@ export default function ExpenseTracker() {
     setView("list"); setDbReady(false); setExps([]); setTrips([]); setBanks([]);
     setCats(OLD_DEFAULT_CATEGORIES); setUserKey(null); setEditId(null);
     setAmt(""); setNote(""); setCat("personal"); setPay("cash");
-    setMindfulPopup(null); setMindfulPrefs({ essentialSigs: [], avoidableSigs: [], autoMonthlyPopup: true });
+    setMindfulPopup(null); setMindfulExpanded(false);
+    setMindfulPrefs({ essentialSigs: [], avoidableSigs: [], reviewedScopes: [], autoMonthlyPopup: true });
   }, [userId]);
 
   // ── Load data + realtime ──────────────────────────────────────────────────
@@ -349,7 +351,13 @@ export default function ExpenseTracker() {
         } catch {}
       }
       // Resilient if mindful_json column doesn't exist yet
-      const mPrefs = safeParse(prefsRow?.mindful_json) || { essentialSigs: [], avoidableSigs: [], autoMonthlyPopup: true };
+      const parsedMindful = safeParse(prefsRow?.mindful_json) || {};
+      const mPrefs = {
+        essentialSigs: parsedMindful.essentialSigs || [],
+        avoidableSigs: parsedMindful.avoidableSigs || [],
+        reviewedScopes: parsedMindful.reviewedScopes || [],
+        autoMonthlyPopup: parsedMindful.autoMonthlyPopup !== false,
+      };
       setMindfulPrefs(mPrefs);
 
       setDbReady(true);
@@ -445,6 +453,13 @@ export default function ExpenseTracker() {
       [key]: [...new Set([...(current[key] || []), sig])],
       [otherKey]: (current[otherKey] || []).filter(s => s !== sig),
     });
+  }, [saveMindfulPrefs]);
+
+  const markMindfulReviewed = useCallback((scopeKey) => {
+    if (!scopeKey) return;
+    const current = mindfulPrefsRef.current.reviewedScopes || [];
+    if (current.includes(scopeKey)) return;
+    saveMindfulPrefs({ reviewedScopes: [...current, scopeKey] });
   }, [saveMindfulPrefs]);
 
   // ── Computed ──────────────────────────────────────────────────────────────
@@ -979,6 +994,18 @@ ${breakdownHtml}
 
   const insPeriodLabel = useMemo(() => periodLabel(insAsPeriod), [insAsPeriod]);
 
+  const mindfulScopeKey = useMemo(() => insAsPeriod.scope === "all"
+    ? "all"
+    : insAsPeriod.scope === "year"
+      ? `year-${insAsPeriod.year}`
+      : `month-${insAsPeriod.year}-${insAsPeriod.month}`,
+  [insAsPeriod]);
+
+  useEffect(() => { setMindfulExpanded(false); }, [mindfulScopeKey]);
+
+  const isMindfulReviewed = (mindfulPrefs.reviewedScopes || []).includes(mindfulScopeKey);
+  const showMindfulDetails = !isMindfulReviewed || mindfulExpanded;
+
   const ins = useMemo(() => {
     const hasTripInPeriod = exps.some(e => e.tripId && e.category !== "investment" && inPeriodFor(e, insAsPeriod));
     const tm = exps.filter(e => {
@@ -1405,8 +1432,14 @@ ${breakdownHtml}
                   <div style={{ flex: 1, background: "#FF9500" }} />
                 </div>
 
-                {/* Top avoidable items */}
-                {mindfulReport.topAvoidable.length > 0 && (
+                {/* Top avoidable items — collapsible after first review */}
+                {mindfulReport.topAvoidable.length > 0 && !showMindfulDetails && (
+                  <button onClick={() => { hap(); setMindfulExpanded(true); }}
+                    style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px dashed ${G.bdr}`, background: "transparent", fontSize: 12, fontWeight: 600, color: G.t3, cursor: "pointer" }}>
+                    View top {mindfulReport.topAvoidable.length} avoidable · {Math.round(mindfulReport.topAvoidablePctOfDisc * 100)}% of discretionary →
+                  </button>
+                )}
+                {mindfulReport.topAvoidable.length > 0 && showMindfulDetails && (
                   <>
                     <div style={{ fontSize: 11, color: G.t3, marginBottom: 4, fontWeight: 600 }}>
                       Top {mindfulReport.topAvoidable.length} = {Math.round(mindfulReport.topAvoidablePctOfDisc * 100)}% of discretionary
@@ -1426,16 +1459,20 @@ ${breakdownHtml}
                             </div>
                           </div>
                           <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-                            <button onClick={() => { hap(); markMindfulSig(e.sig, "essential"); sToast("Marked essential"); }}
+                            <button onClick={() => { hap(); markMindfulSig(e.sig, "essential"); markMindfulReviewed(mindfulScopeKey); sToast("Marked essential"); }}
                               title="Mark essential"
                               style={{ width: 28, height: 28, borderRadius: "50%", border: `1px solid #34C75955`, background: "transparent", fontSize: 14, fontWeight: 700, color: "#34C759", cursor: "pointer", padding: 0, lineHeight: 1 }}>✓</button>
-                            <button onClick={() => { hap(); markMindfulSig(e.sig, "avoidable"); sToast("Noted — we'll keep flagging"); }}
+                            <button onClick={() => { hap(); markMindfulSig(e.sig, "avoidable"); markMindfulReviewed(mindfulScopeKey); sToast("Noted — we'll keep flagging"); }}
                               title="Confirm avoidable"
                               style={{ width: 28, height: 28, borderRadius: "50%", border: `1px solid #FF950055`, background: "transparent", fontSize: 14, fontWeight: 700, color: "#FF9500", cursor: "pointer", padding: 0, lineHeight: 1 }}>!</button>
                           </div>
                         </div>
                       );
                     })}
+                    <button onClick={() => { hap(); markMindfulReviewed(mindfulScopeKey); setMindfulExpanded(false); }}
+                      style={{ width: "100%", marginTop: 6, padding: "6px 10px", borderRadius: 8, border: "none", background: "transparent", fontSize: 11, color: G.tm, cursor: "pointer" }}>
+                      Done reviewing · hide
+                    </button>
                   </>
                 )}
 
