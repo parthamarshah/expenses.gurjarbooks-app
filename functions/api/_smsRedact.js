@@ -23,7 +23,7 @@
 const SAFE_WORDS = new Set([
   // Bank names / aliases
   "hdfc", "icici", "sbi", "axis", "kotak", "indusind", "idfc", "first", "yes",
-  "pnb", "bob", "federal", "canara", "union", "boi", "bank", "state", "punjab",
+  "pnb", "bob", "federal", "canara", "union", "boi", "dcb", "bank", "state", "punjab",
   "national", "baroda", "india",
   // Transaction vocabulary
   "txn", "transaction", "spent", "debit", "debited", "withdrawn", "withdrawal",

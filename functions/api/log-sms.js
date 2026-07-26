@@ -86,10 +86,16 @@ export async function onRequestPost(context) {
     }
 
     // Extract last4 from SMS for matching. Masked form first (older SMS: "XX2660"),
-    // then bare form anchored to "card" only (newer HDFC SMS: "Card 2660", no mask).
-    // Deliberately not matching bare "a/c NNNN" — a transfer SMS can mention a
-    // beneficiary's account number before the sender's own, which would misattribute.
+    // then asterisk-masked form anchored to "a/c"/"account"/"card" (DCB: "a/c*3272")
+    // — anchored, not merged into the first alternation, because an unanchored "*"
+    // match could otherwise win against a masked reference/UTR number that appears
+    // earlier in the SMS than the real account mask (leftmost-match-wins), misattributing
+    // the transaction to the wrong bank/card. Then bare form anchored to "card" only
+    // (newer HDFC SMS: "Card 2660", no mask). Deliberately not matching bare "a/c NNNN"
+    // — a transfer SMS can mention a beneficiary's account number before the sender's
+    // own, which would misattribute.
     const last4Match = sms.match(/(?:XX?|xx?|ending|x{1,2})(\d{4})/)
+      || sms.match(/(?:a\/c|acc(?:ount)?|card)[^\d\n]{0,15}?\*+(\d{4})/i)
       || sms.match(/\bcard\s+(\d{4})\b/i);
     const smsLast4 = last4Match ? last4Match[1] : null;
 
@@ -97,13 +103,13 @@ export async function onRequestPost(context) {
       hdfc: "HDFC", icici: "ICICI", sbi: "SBI", axis: "Axis",
       kotak: "Kotak", indusind: "IndusInd", idfc: "IDFC", yes: "Yes Bank",
       pnb: "PNB", bob: "BOB", federal: "Federal", canara: "Canara",
-      union: "Union", boi: "BOI",
+      union: "Union", boi: "BOI", dcb: "DCB",
     };
     const bankPatterns = {
       hdfc: /hdfc/i, icici: /icici/i, sbi: /sbi|state\s*bank/i, axis: /axis/i,
       kotak: /kotak/i, indusind: /indus/i, idfc: /idfc/i, yes: /yes\s*bank/i,
       pnb: /pnb|punjab/i, bob: /baroda|bob/i, federal: /federal/i,
-      canara: /canara/i, union: /union/i, boi: /bank\s*of\s*india/i,
+      canara: /canara/i, union: /union/i, boi: /bank\s*of\s*india/i, dcb: /dcb/i,
     };
 
     let matched = null;
@@ -298,6 +304,7 @@ function identifyBank(sms) {
   if (/canara/i.test(sms))                             return "canara";
   if (/union\s*bank/i.test(sms))                       return "union";
   if (/bank\s*of\s*india\b/i.test(sms))               return "boi";
+  if (/dcb\s*bank/i.test(sms))                         return "dcb";
   return "unknown";
 }
 
@@ -426,6 +433,10 @@ function parseSmsAmount(sms, bank) {
       /Sent\s+Rs\.?\s*([\d,]+(?:\.\d{1,2})?)\s+from/i,
       /Rs\.?\s*([\d,]+(?:\.\d{1,2})?)\s+(?:was\s+)?debited/i,
       /Spent\s+Rs\.?\s*([\d,]+(?:\.\d{1,2})?)/i,
+    ],
+    dcb: [
+      // "INR 2 debited DCB Bank a/c*3272 POS/Ecom txn"
+      /INR\s*([\d,]+(?:\.\d{1,2})?)\s+debited/i,
     ],
   };
 
