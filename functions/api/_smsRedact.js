@@ -30,23 +30,40 @@ const SAFE_WORDS = new Set([
   "transferred", "transfer", "paid", "payment", "purchase", "purchased", "sent",
   "received", "credited", "charged", "used",
   // Structural / boilerplate
-  "on", "at", "to", "from", "using", "card", "credit", "account", "acc", "by",
-  "upi", "vpa", "ref", "info", "avl", "lmt", "limit", "available", "balance",
-  "bal", "not", "you", "call", "sms", "block", "cc", "dispute", "emi", "neft",
-  "imps", "rtgs", "standing", "instruction", "auto", "pay", "top", "up", "lite",
-  "rs", "inr", "rupees", "dear", "customer", "alert", "money", "towards",
-  "remarks", "narration", "description", "your", "a", "of", "is", "the", "for",
-  "was", "has", "been", "with", "please", "thank", "thanks", "regards",
-  "atm", "cash", "withdrawal", "location", "near", "branch", "dispute", "if",
-  "immediately", "report", "fraud", "help", "support", "utr", "rrn", "type",
-  "mode", "successful", "success", "confirmed", "confirmation", "processed",
-  "pending", "id", "no", "number", "new", "old", "current", "savings",
+  "on", "at", "to", "from", "using", "card", "credit", "account", "acc", "acct",
+  "ac", "by", "upi", "vpa", "ref", "info", "avl", "lmt", "limit", "available",
+  "balance", "bal", "not", "you", "call", "sms", "block", "cc", "dispute", "emi",
+  "neft", "imps", "rtgs", "standing", "instruction", "auto", "pay", "top", "up",
+  "lite", "amounting", "amount", "rs", "inr", "rupees", "dear", "customer",
+  "alert", "money", "towards", "remarks", "narration", "description", "your",
+  "a", "of", "is", "the", "for", "was", "has", "have", "been", "with", "please",
+  "thank", "thanks", "regards", "atm", "cash", "withdrawal", "wdl", "location",
+  "near", "branch", "dispute", "if", "immediately", "report", "fraud", "help",
+  "support", "utr", "rrn", "type", "mode", "successful", "success", "confirmed",
+  "confirmation", "processed", "pending", "id", "no", "number", "new", "old",
+  "current", "savings", "pos", "ecom", "ending", "via",
   // Placeholder token this module inserts itself
   "vpa",
 ]);
 
 const DATE_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 DATE_MONTHS.forEach(m => SAFE_WORDS.add(m));
+
+// Curated, deliberately non-exhaustive list of high-frequency Indian merchant/payment-app
+// names. These are NOT personal information — a chain name doesn't reveal which user sent
+// the SMS — so allow-listing them doesn't weaken the fail-closed guarantee below: an actual
+// personal name (e.g. an NEFT beneficiary) is still never on this list and still trips the
+// residue check exactly as before. This list will always miss real merchants; that's fine,
+// under-collecting is the safe failure mode (see module header). Expand as needed, but
+// never add anything here that could be a person's name rather than a brand.
+const SAFE_MERCHANTS = [
+  "swiggy", "zomato", "amazon", "flipkart", "uber", "ola", "rapido", "myntra",
+  "ajio", "nykaa", "meesho", "bigbasket", "blinkit", "zepto", "dunzo",
+  "phonepe", "paytm", "gpay", "googlepay", "irctc", "netflix", "spotify",
+  "hotstar", "dominos", "mcdonalds", "starbucks", "bookmyshow", "makemytrip",
+  "airtel", "jio", "vodafone",
+];
+SAFE_MERCHANTS.forEach(m => SAFE_WORDS.add(m));
 
 /**
  * Redacts a raw SMS for the training corpus. Returns { ok: false, redacted: null } if
@@ -61,7 +78,10 @@ export function redactSms(sms) {
   // 1. Shape-preserving digit-run redaction — same-length "X" run.
   // Covers amounts ("Rs.80.00" -> "Rs.XX.XX"), last4/account digits, dates
   // ("15-07" -> "XX-XX"), phone numbers, and reference/UTR numbers uniformly.
-  text = text.replace(/\d{2,}/g, (m) => "X".repeat(m.length));
+  // \d+ (not \d{2,}): a single-digit amount ("Rs.2 debited") is still an amount —
+  // leaving lone digits unredacted meant they survived as unexplained residue in
+  // the safety check below and wrongly refused an otherwise-clean message.
+  text = text.replace(/\d+/g, (m) => "X".repeat(m.length));
 
   // 2. VPA handling — keep the @domain (a fixed, NPCI-assigned PSP handle suffix
   // like @ybl/@paytm/@rzp, shared across many users' VPAs, never arbitrary personal
@@ -83,11 +103,23 @@ export function redactSms(sms) {
   // reject-known-bad-words scan, this fails closed on non-Latin script too: those
   // characters simply don't match any of the "safe" patterns below, so they're never
   // stripped and always trip the final length check.
+  //
+  // "a/c" (and "a / c") is normalized to "account" for THIS check only — word-boundary
+  // matching would otherwise split it into orphan single-character tokens ("a", "c") on
+  // either side of the slash, and a bare "c" trips the residue check even though "a/c" is
+  // just the extremely common bank abbreviation for "account". This does not touch `text`
+  // (the string that gets stored), so a sampled message keeps "a/c" in its original shape.
+  const normalizedForCheck = scanText.replace(/\ba\s*\/\s*c\b/gi, "account");
   const safeWordPattern = new RegExp(`\\b(${[...SAFE_WORDS].join("|")})\\b`, "gi");
-  const residue = scanText
+  const residue = normalizedForCheck
     .replace(safeWordPattern, "")
-    .replace(/\b(?:X+|vpa)\b/g, "")
-    .replace(/[\s.,:;\-/@?!'"()&]/g, "");
+    // Case-insensitive: some banks mask with lowercase "x" (HDFC: "Card x8812"), which after
+    // digit-run redaction (step 1) leaves a mixed-case token like "xXXXX" — a case-sensitive
+    // X+ here would miss it (no word boundary between the leading lowercase "x" and the
+    // uppercase run), leaving it as unexplained residue and wrongly refusing the message.
+    .replace(/\b(?:X+|vpa)\b/gi, "")
+    // "*" included: DCB and others mask with asterisks ("a/c*3272"), same structural role as X.
+    .replace(/[\s.,:;\-/@?!'"()&*]/g, "");
   if (residue.length > 0) {
     return { ok: false, redacted: null };
   }
