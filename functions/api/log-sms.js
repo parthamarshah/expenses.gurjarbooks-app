@@ -197,8 +197,25 @@ export async function onRequestPost(context) {
 
   if (!category || catLower === "auto") {
     // ── Smart auto-categorize from note history ──
-    const keyword = (note || "").replace(/[^a-zA-Z\s]/g, "").trim().split(/\s+/)[0];
-    if (keyword && keyword.length >= 3) {
+    // Use the raw first token (not stripped of digits/@/./-) so opaque VPA-style
+    // notes like "Q286903021@ybl" can match themselves on repeat transactions.
+    // Reject tokens containing SQL LIKE wildcards outright rather than truncating
+    // them into a short generic prefix (e.g. "ravi" from "ravi_kumar@okaxis" would
+    // false-match unrelated merchants). Require >=3 alphanumeric chars so
+    // punctuation-heavy short prefixes like "M/S" (from "M/S SHARMA TRADERS")
+    // stay blocked, same as before. "Auto-debit" is excluded because parseSmsNote
+    // returns that exact literal for every standing instruction regardless of
+    // payee, so it would otherwise conflate unrelated SIPs/insurance/bills.
+    const GENERIC_NOTES = new Set(["SMS expense", "Auto-debit"]);
+    const keyword = (note || "").trim().split(/\s+/)[0] || "";
+    const alnumLen = keyword.replace(/[^a-zA-Z0-9]/g, "").length;
+    if (
+      keyword &&
+      alnumLen >= 3 &&
+      !/[%_*\\]/.test(keyword) &&
+      !/^\d+$/.test(keyword) &&
+      !GENERIC_NOTES.has(note)
+    ) {
       const { data: prev } = await supabase
         .from("expenses")
         .select("category")
