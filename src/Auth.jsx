@@ -4,7 +4,7 @@ import { useAuth } from "./AuthContext";
 
 const G = {
   bg: "#FFF", bg2: "#F5F5F5", bdr: "#D4D4D4",
-  t1: "#111", t3: "#888", tm: "#AAA",
+  t1: "#111", t2: "#555", t3: "#888", tm: "#AAA",
   bk: "#000", wh: "#FFF",
 };
 
@@ -75,36 +75,38 @@ export default function Auth() {
 }
 
 function useStats() {
-  const [stats, setStats] = useState(null);
+  const [state, setState] = useState({ stats: null, status: "loading" });
   useEffect(() => {
-    fetch("/api/stats").then(r => r.json()).then(d => { if (d.ok) setStats(d); }).catch(() => {});
+    fetch("/api/stats").then(r => r.json())
+      .then(d => setState(d.ok ? { stats: d, status: "success" } : { stats: null, status: "error" }))
+      .catch(() => setState({ stats: null, status: "error" }));
   }, []);
-  return stats;
+  return state;
 }
 
 function useStatsHistory() {
-  const [history, setHistory] = useState(null);
+  const [state, setState] = useState({ history: null, status: "loading" });
   useEffect(() => {
-    fetch("/api/stats-history").then(r => r.json()).then(d => { if (d.ok) setHistory(d.weeks); }).catch(() => {});
+    fetch("/api/stats-history").then(r => r.json())
+      .then(d => setState(d.ok ? { history: d.weeks, status: "success" } : { history: null, status: "error" }))
+      .catch(() => setState({ history: null, status: "error" }));
   }, []);
-  return history;
+  return state;
 }
 
 function ActivityChart({ weeks }) {
   if (!weeks || weeks.length < 2) return null;
   const W = 280, H = 90;
-  // Build cumulative entry counts
-  const points = weeks.reduce((acc, w, i) => {
-    const cumulative = (acc[i - 1]?.cumulative ?? 0) + w.entries;
-    const x = 4 + (i / (weeks.length - 1)) * (W - 8);
-    return [...acc, { x, cumulative, i }];
-  }, []);
-  const maxVal = points[points.length - 1].cumulative || 1;
+  const points = weeks.map((w, i) => ({
+    x: 4 + (i / (weeks.length - 1)) * (W - 8),
+    entries: w.entries,
+  }));
+  const maxVal = Math.max(1, ...points.map(p => p.entries));
   const toY = (v) => H - 16 - Math.round((v / maxVal) * (H - 28));
-  const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${toY(p.cumulative)}`).join(" ");
+  const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${toY(p.entries)}`).join(" ");
   const areaPath = `${linePath} L ${points[points.length - 1].x.toFixed(1)} ${H - 16} L ${points[0].x.toFixed(1)} ${H - 16} Z`;
-  const endX = points[points.length - 1].x;
-  const endY = toY(points[points.length - 1].cumulative);
+  const last = points[points.length - 1];
+  const endY = toY(last.entries);
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 90 }}>
       <defs>
@@ -115,10 +117,9 @@ function ActivityChart({ weeks }) {
       </defs>
       <path d={areaPath} fill="url(#cg)" />
       <path d={linePath} fill="none" stroke="#FF9500" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx={endX.toFixed(1)} cy={endY} r={3} fill="#FF9500" />
+      <circle cx={last.x.toFixed(1)} cy={endY} r={3} fill="#FF9500" />
       <line x1={4} y1={H - 16} x2={W - 4} y2={H - 16} stroke={G.bdr} strokeWidth={1} />
-      <text x={4} y={H - 5} fontSize={7} fill={G.t3}>13 weeks · total entries</text>
-      <text x={W - 4} y={H - 5} fontSize={7} fill="#FF9500" textAnchor="end">{points[points.length - 1].cumulative.toLocaleString("en-IN")}</text>
+      <text x={W - 4} y={H - 5} fontSize={7} fill="#FF9500" textAnchor="end">{last.entries.toLocaleString("en-IN")} last week</text>
     </svg>
   );
 }
@@ -130,8 +131,18 @@ function AuthInner() {
   const [err,      setErr]      = useState("");
   const [info,     setInfo]     = useState("");
   const [busy,     setBusy]     = useState(false);
-  const stats = useStats();
-  const history = useStatsHistory();
+  const { stats, status: statsStatus } = useStats();
+  const { history, status: historyStatus } = useStatsHistory();
+  const [statsShown, setStatsShown] = useState(false);
+  const reduceMotion = typeof window !== "undefined" && window.matchMedia
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  useEffect(() => {
+    if (statsStatus === "success") {
+      if (reduceMotion) { setStatsShown(true); return; }
+      const raf = requestAnimationFrame(() => setStatsShown(true));
+      return () => cancelAnimationFrame(raf);
+    }
+  }, [statsStatus, reduceMotion]);
 
   const reset = (m) => { setMode(m); setErr(""); setInfo(""); };
 
@@ -315,36 +326,59 @@ function AuthInner() {
       )}
 
       {/* Anonymous aggregate stats + activity chart */}
-      {stats && (
-        <div style={{ marginTop: 28, borderTop: `1px solid ${G.bdr}`, paddingTop: 20 }}>
+      {(statsStatus === "loading" || stats) && (
+        <div style={{ marginTop: 28, borderTop: `1px solid ${G.bdr}`, paddingTop: 20,
+                      opacity: statsStatus === "loading" || statsShown ? 1 : 0,
+                      transform: reduceMotion || statsStatus === "loading" || statsShown ? "translateY(0)" : "translateY(6px)",
+                      transition: reduceMotion ? "none" : "opacity 280ms ease, transform 280ms ease" }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: G.tm, textTransform: "uppercase",
                         letterSpacing: 1.2, textAlign: "center", marginBottom: 12 }}>
             Community Stats
           </div>
-          <div style={{ display: "flex", gap: 8, marginBottom: history && history.length >= 2 ? 14 : 0 }}>
-            {[
-              { label: "Expenses logged", value: stats.total_expenses.toLocaleString("en-IN") },
-              { label: "This week", value: stats.expenses_this_week.toLocaleString("en-IN") },
-              { label: "Active users", value: stats.active_users_this_week.toLocaleString("en-IN") },
-            ].map(s => (
-              <div key={s.label} style={{ flex: 1, textAlign: "center", background: G.bg2,
-                                          borderRadius: 12, padding: "10px 6px" }}>
-                <div style={{ fontSize: 18, fontWeight: 800, color: G.t1, letterSpacing: -0.5 }}>
-                  {s.value}
-                </div>
-                <div style={{ fontSize: 10, color: G.t3, marginTop: 3, lineHeight: 1.3 }}>
-                  {s.label}
-                </div>
-              </div>
-            ))}
-          </div>
-          {history && history.length >= 2 && (
-            <div style={{ background: G.bg2, borderRadius: 12, padding: "12px 12px 8px" }}>
-              <div style={{ fontSize: 10, color: G.t3, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 8 }}>
-                Activity · last {history.length} weeks
-              </div>
-              <ActivityChart weeks={history} />
+          {statsStatus === "loading" ? (
+            <div style={{ display: "flex", gap: 8 }}>
+              {[0, 1, 2].map(i => (
+                <div key={i} style={{ flex: 1, height: 62, background: G.bg2,
+                                      border: `1px solid ${G.bdr}`, borderRadius: 12 }} />
+              ))}
             </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: 8 }}>
+                {[
+                  { label: "Expenses logged", value: stats.total_expenses.toLocaleString("en-IN") },
+                  { label: "Last 7 days", value: stats.expenses_this_week.toLocaleString("en-IN") },
+                  { label: "Active users (7d)", value: stats.active_users_this_week.toLocaleString("en-IN") },
+                ].map(s => (
+                  <div key={s.label} style={{ flex: 1, textAlign: "center", background: G.bg2,
+                                              border: `1px solid ${G.bdr}`, borderRadius: 12, padding: "10px 6px" }}>
+                    <div style={{ fontSize: 19, fontWeight: 800, color: G.t1, letterSpacing: -0.5 }}>
+                      {s.value}
+                    </div>
+                    <div style={{ fontSize: 10, color: G.t3, marginTop: 3, lineHeight: 1.3 }}>
+                      {s.label}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {stats.active_users_this_week > 0 && stats.expenses_this_week < 1000
+                && Math.round(stats.expenses_this_week / stats.active_users_this_week) >= 1 && (
+                <div style={{ textAlign: "center", fontSize: 12, fontWeight: 500, color: G.t2, marginTop: 10 }}>
+                  {(() => {
+                    const avg = Math.round(stats.expenses_this_week / stats.active_users_this_week);
+                    return `~${avg} ${avg === 1 ? "entry" : "entries"} per active user this week`;
+                  })()}
+                </div>
+              )}
+              {historyStatus === "success" && history && history.length >= 2 && (
+                <div style={{ background: G.bg2, borderRadius: 12, padding: "12px 12px 8px", marginTop: 14 }}>
+                  <div style={{ fontSize: 10, color: G.t3, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 8 }}>
+                    Activity · last {history.length} weeks
+                  </div>
+                  <ActivityChart weeks={history} />
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
